@@ -183,6 +183,8 @@ for h in db.get("harcamalar", []):
 
 if "fisten_okunanlar" not in st.session_state:
     st.session_state.fisten_okunanlar = []
+if "duzenle_id" not in st.session_state:
+    st.session_state.duzenle_id = None
 if "gemini_api_key" not in st.session_state:
     st.session_state.gemini_api_key = (
         st.secrets.get("GEMINI_API_KEY", DEFAULT_GEMINI_API_KEY)
@@ -488,13 +490,85 @@ elif menu == "💸 Manuel Harcama Ekle":
                 })
             st.dataframe(pd.DataFrame(ozet), use_container_width=True)
             st.metric("Toplam Harcama", f"{sum(h['Tutar'] for h in st.session_state.harcamalar):,.2f} ₺")
-            sil_h = st.selectbox("🗑️ Silinecek Harcama:",
-                [f"#{h['ID']} – {h['Açıklama']} ({h['Tutar']:.2f} ₺)" for h in st.session_state.harcamalar])
-            if st.button("❌ Seçili Harcamayı Sil"):
-                sid = int(sil_h.split(" – ")[0].replace("#",""))
-                st.session_state.harcamalar = [h for h in st.session_state.harcamalar if h["ID"] != sid]
-                db_kaydet()
-                st.rerun()
+
+            # İşlem Seçimi
+            st.markdown("**🛠️ Harcama İşlemleri:**")
+            secim_listesi = [f"#{h['ID']} – {h['Açıklama']} ({h['Tutar']:.2f} ₺)" for h in st.session_state.harcamalar]
+            secilen = st.selectbox("Harcama Seçin:", secim_listesi, key="islem_secim")
+            secilen_id = int(secilen.split(" – ")[0].replace("#",""))
+
+            col_d, col_e = st.columns(2)
+            with col_d:
+                if st.button("❌ Sil", use_container_width=True):
+                    st.session_state.harcamalar = [h for h in st.session_state.harcamalar if h["ID"] != secilen_id]
+                    st.session_state.duzenle_id = None
+                    db_kaydet()
+                    st.rerun()
+            with col_e:
+                if st.button("✏️ Düzenle", use_container_width=True, type="primary"):
+                    st.session_state.duzenle_id = secilen_id
+
+            # Düzenleme Formu
+            if st.session_state.duzenle_id is not None:
+                mevcut = next((h for h in st.session_state.harcamalar if h["ID"] == st.session_state.duzenle_id), None)
+                if mevcut:
+                    st.markdown("---")
+                    st.subheader(f"✏️ Düzenleniyor: #{mevcut['ID']} — {mevcut['Açıklama']}")
+                    isimler_d = [k["İsim"] for k in st.session_state.kisiler]
+
+                    with st.form("duzenle_form"):
+                        yeni_aciklama = st.text_input("Açıklama", value=mevcut["Açıklama"])
+                        col_td, col_kd = st.columns(2)
+                        with col_td:
+                            yeni_tutar = st.number_input("Tutar (₺)", value=float(mevcut["Tutar"]), step=10.0, format="%.2f")
+                        with col_kd:
+                            kat_idx = KATEGORILER.index(mevcut.get("Kategori", KATEGORILER[0])) if mevcut.get("Kategori") in KATEGORILER else 0
+                            yeni_kat = st.selectbox("Kategori", KATEGORILER, index=kat_idx)
+
+                        odeyen_idx = isimler_d.index(mevcut["Ödeyen"]) if mevcut["Ödeyen"] in isimler_d else 0
+                        yeni_odeyen = st.selectbox("Parayı Kim Ödedi?", isimler_d, index=odeyen_idx)
+
+                        st.markdown("**🎯 Kimler dahil?**")
+                        mevcut_dahil = [d for d in mevcut.get("Dahil Olanlar", []) if d in isimler_d]
+                        yeni_dahil = st.multiselect("Dahil Olan Kişiler (Opsiyonel)", options=isimler_d, default=mevcut_dahil)
+
+                        st.markdown("**📅 Tarih Aralığı:**")
+                        m_bas = mevcut.get("Başlangıç", st.session_state.tatil_bas)
+                        m_bit = mevcut.get("Bitiş", st.session_state.tatil_bit)
+                        yeni_tar = st.date_input("Tarih Aralığı",
+                            value=(m_bas, m_bit),
+                            min_value=st.session_state.tatil_bas - timedelta(days=60),
+                            max_value=st.session_state.tatil_bit + timedelta(days=60))
+
+                        col_kaydet, col_iptal = st.columns(2)
+                        with col_kaydet:
+                            kaydet_btn = st.form_submit_button("💾 Değişiklikleri Kaydet", use_container_width=True, type="primary")
+                        with col_iptal:
+                            iptal_btn = st.form_submit_button("🚫 İptal", use_container_width=True)
+
+                        if kaydet_btn:
+                            yb, ys = (yeni_tar if isinstance(yeni_tar,(list,tuple)) and len(yeni_tar)==2
+                                       else (yeni_tar[0], yeni_tar[0]) if isinstance(yeni_tar,(list,tuple)) else (yeni_tar, yeni_tar))
+                            for h in st.session_state.harcamalar:
+                                if h["ID"] == st.session_state.duzenle_id:
+                                    h["Açıklama"]     = yeni_aciklama
+                                    h["Tutar"]        = yeni_tutar
+                                    h["Kategori"]     = yeni_kat
+                                    h["Ödeyen"]       = yeni_odeyen
+                                    h["Dahil Olanlar"]= yeni_dahil
+                                    h["Başlangıç"]    = yb
+                                    h["Bitiş"]        = ys
+                                    break
+                            db_kaydet()
+                            st.session_state.duzenle_id = None
+                            st.success("✅ Harcama güncellendi!")
+                            st.rerun()
+
+                        if iptal_btn:
+                            st.session_state.duzenle_id = None
+                            st.rerun()
+
+
 
 # -------------------------------------------------------------------
 # MENÜ 4: FİŞTEN AI İLE EKLE
