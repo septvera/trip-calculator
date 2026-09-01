@@ -15,8 +15,8 @@ DEFAULT_OWM_API_KEY = ""   # OpenWeatherMap — opsiyonel
 DEFAULT_SEHIR = "Bodrum"
 
 st.set_page_config(
-    page_title="Akbük Tatil Hesaplayıcı",
-    page_icon="🏖️",
+    page_title="Basement Kasa",
+    page_icon="🏠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -295,7 +295,7 @@ def hesapla_bakiyeler():
 # ==========================================
 # 📱 8. ARAYÜZ
 # ==========================================
-st.title("🏖️ Tatil Harcama & Ev Takvimi")
+st.title("🏠 Basement Kasa")
 
 col_s1, col_s2 = st.columns([3, 1])
 with col_s1:
