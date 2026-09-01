@@ -25,22 +25,18 @@ st.set_page_config(
 # ==========================================
 st.markdown("""
 <style>
-    /* Google Fonts Yükleme: Plus Jakarta Sans & Outfit */
     @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap');
 
-    /* Genel Yazı Tipi Ayarı */
     html, body, [class*="css"], .stMarkdown, p, div, span, label, input, button, select {
         font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
     }
 
-    /* Başlıklar İçin Özel Modern Font */
     h1, h2, h3, h4, h5, h6 {
         font-family: 'Outfit', sans-serif !important;
         font-weight: 700 !important;
         letter-spacing: -0.02em !important;
     }
 
-    /* Ana Başlık Özel Gradyan Rengi */
     h1 {
         background: linear-gradient(135deg, #00838F 0%, #00ACC1 50%, #FF7043 100%);
         -webkit-background-clip: text;
@@ -49,7 +45,6 @@ st.markdown("""
         padding-bottom: 0.2rem;
     }
 
-    /* Kartlar ve Expander Görünümleri */
     div[data-testid="stExpander"] {
         border: 1px solid #E2E8F0 !important;
         border-radius: 14px !important;
@@ -58,7 +53,6 @@ st.markdown("""
         margin-bottom: 12px !important;
     }
 
-    /* Form ve Buton Stilleri */
     div.stButton > button {
         border-radius: 10px !important;
         font-family: 'Outfit', sans-serif !important;
@@ -71,14 +65,12 @@ st.markdown("""
         box-shadow: 0 4px 12px rgba(0, 131, 143, 0.25) !important;
     }
 
-    /* Tablo & Veri Çerçevesi İyileştirmesi */
     div[data-testid="stDataFrame"] {
         border-radius: 12px !important;
         overflow: hidden !important;
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04) !important;
     }
 
-    /* Bilgi ve Uyarı Kutuları */
     div[data-testid="stAlert"] {
         border-radius: 12px !important;
         font-weight: 500 !important;
@@ -87,12 +79,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 🧠 3. SESSION STATE (BELLEK) YÖNETİMİ
+# 🧠 3. SESSION STATE (BELLEK) YÖNETİMİ & GÜVENLİK
 # ==========================================
 bugun = date.today()
-if 'tatil_baslangic' not in st.session_state:
+if 'tatil_baslangic' not in st.session_state or not isinstance(st.session_state.tatil_baslangic, date):
     st.session_state.tatil_baslangic = bugun
-if 'tatil_bitis' not in st.session_state:
+if 'tatil_bitis' not in st.session_state or not isinstance(st.session_state.tatil_bitis, date):
     st.session_state.tatil_bitis = bugun + timedelta(days=13)
 if 'kisiler' not in st.session_state:
     st.session_state.kisiler = []
@@ -105,6 +97,29 @@ if 'gemini_api_key' not in st.session_state:
         st.session_state.gemini_api_key = st.secrets["GEMINI_API_KEY"]
     else:
         st.session_state.gemini_api_key = DEFAULT_GEMINI_API_KEY
+
+# Güvenli Tarih Dönüştürücü (Eski ve yeni verileri hatasız eşitler)
+def to_date_obj(val, default_date):
+    if isinstance(val, (date, datetime)):
+        return val if isinstance(val, date) else val.date()
+    elif isinstance(val, int):
+        # Eski versiyondan kalan 1-14 gün sayıları için otomatik tarih üretme
+        return st.session_state.tatil_baslangic + timedelta(days=max(0, val - 1))
+    return default_date
+
+# Mevcut verileri güvenli formata dönüştür (Giriş/Geliş KeyError koruması)
+for k in st.session_state.kisiler:
+    k_giris_raw = k.get("Giriş") if "Giriş" in k else k.get("Geliş", 1)
+    k_cikis_raw = k.get("Çıkış") if "Çıkış" in k else k.get("Gidiş", 14)
+    k["Giriş"] = to_date_obj(k_giris_raw, st.session_state.tatil_baslangic)
+    k["Çıkış"] = to_date_obj(k_cikis_raw, st.session_state.tatil_bitis)
+    k["Kalış Süresi"] = f"{(k['Çıkış'] - k['Giriş']).days + 1} Gün"
+
+for h in st.session_state.harcamalar:
+    h_bas_raw = h.get("Başlangıç", 1)
+    h_bit_raw = h.get("Bitiş", 14)
+    h["Başlangıç"] = to_date_obj(h_bas_raw, st.session_state.tatil_baslangic)
+    h["Bitiş"] = to_date_obj(h_bit_raw, st.session_state.tatil_bitis)
 
 def get_tatil_gunleri():
     bas = st.session_state.tatil_baslangic
@@ -192,8 +207,8 @@ if menu == "📅 Ev Takvimi & Doluluk":
         
         for k in st.session_state.kisiler:
             kisi_adi = k["İsim"]
-            k_giris = k["Giriş"]
-            k_cikis = k["Çıkış"]
+            k_giris = k.get("Giriş", st.session_state.tatil_baslangic)
+            k_cikis = k.get("Çıkış", st.session_state.tatil_bitis)
             
             satir = []
             for g in gunler_listesi:
@@ -207,7 +222,7 @@ if menu == "📅 Ev Takvimi & Doluluk":
         
         gunluk_sayilar = []
         for g in gunler_listesi:
-            sayi = sum(1 for k in st.session_state.kisiler if k["Giriş"] <= g <= k["Çıkış"])
+            sayi = sum(1 for k in st.session_state.kisiler if k.get("Giriş", st.session_state.tatil_baslangic) <= g <= k.get("Çıkış", st.session_state.tatil_bitis))
             gunluk_sayilar.append(f"{sayi} Kişi")
         
         df_takvim.loc["👥 TOPLAM KİŞİ"] = gunluk_sayilar
@@ -224,7 +239,7 @@ if menu == "📅 Ev Takvimi & Doluluk":
             max_value=st.session_state.tatil_bitis
         )
         
-        o_gun_evde = [k["İsim"] for k in st.session_state.kisiler if k["Giriş"] <= secili_gun <= k["Çıkış"]]
+        o_gun_evde = [k["İsim"] for k in st.session_state.kisiler if k.get("Giriş", st.session_state.tatil_baslangic) <= secili_gun <= k.get("Çıkış", st.session_state.tatil_bitis)]
         if o_gun_evde:
             st.success(f"**{secili_gun.strftime('%d.%m.%Y %A')}** günü evde olanlar (**{len(o_gun_evde)} Kişi**): " + ", ".join([f"**{isim}**" for isim in o_gun_evde]))
         else:
@@ -245,8 +260,8 @@ elif menu == "👥 Kişileri Yönet":
             tarih_araligi = st.date_input(
                 "Tarih Aralığı Seçin",
                 value=(st.session_state.tatil_baslangic, st.session_state.tatil_bitis),
-                min_value=st.session_state.tatil_baslangic - timedelta(days=30),
-                max_value=st.session_state.tatil_bitis + timedelta(days=30)
+                min_value=st.session_state.tatil_baslangic - timedelta(days=60),
+                max_value=st.session_state.tatil_bitis + timedelta(days=60)
             )
             
             submit_kisi = st.form_submit_button("➕ Kişiyi Takvime Ekle", use_container_width=True)
@@ -267,6 +282,17 @@ elif menu == "👥 Kişileri Yönet":
                             "Kalış Süresi": f"{(k_cikis - k_giris).days + 1} Gün"
                         })
                         st.success(f"✅ {isim} ({k_giris.strftime('%d.%m')} - {k_cikis.strftime('%d.%m')}) başarıyla eklendi!")
+                        st.rerun()
+                elif isinstance(tarih_araligi, (list, tuple)) and len(tarih_araligi) == 1:
+                    k_giris = k_cikis = tarih_araligi[0]
+                    st.session_state.kisiler.append({
+                        "İsim": isim, 
+                        "Giriş": k_giris, 
+                        "Çıkış": k_cikis,
+                        "Kalış Süresi": "1 Gün"
+                    })
+                    st.success(f"✅ {isim} eklendi!")
+                    st.rerun()
                 else:
                     st.error("Lütfen hem giriş hem çıkış tarihini seçiniz!")
 
@@ -275,11 +301,13 @@ elif menu == "👥 Kişileri Yönet":
         if st.session_state.kisiler:
             df_goster = []
             for k in st.session_state.kisiler:
+                giris_val = k.get("Giriş", st.session_state.tatil_baslangic)
+                cikis_val = k.get("Çıkış", st.session_state.tatil_bitis)
                 df_goster.append({
                     "İsim": k["İsim"],
-                    "Giriş Tarihi": k["Giriş"].strftime("%d.%m.%Y"),
-                    "Çıkış Tarihi": k["Çıkış"].strftime("%d.%m.%Y"),
-                    "Kalış Süresi": k["Kalış Süresi"]
+                    "Giriş Tarihi": giris_val.strftime("%d.%m.%Y") if isinstance(giris_val, (date, datetime)) else str(giris_val),
+                    "Çıkış Tarihi": cikis_val.strftime("%d.%m.%Y") if isinstance(cikis_val, (date, datetime)) else str(cikis_val),
+                    "Kalış Süresi": k.get("Kalış Süresi", "1 Gün")
                 })
             st.dataframe(pd.DataFrame(df_goster), use_container_width=True)
             
@@ -315,8 +343,8 @@ elif menu == "💸 Manuel Harcama Ekle":
             harcama_tarihleri = st.date_input(
                 "Tarih Aralığı (Tek gün için aynı tarihi iki kez seçin)",
                 value=(st.session_state.tatil_baslangic, st.session_state.tatil_bitis),
-                min_value=st.session_state.tatil_baslangic - timedelta(days=30),
-                max_value=st.session_state.tatil_bitis + timedelta(days=30)
+                min_value=st.session_state.tatil_baslangic - timedelta(days=60),
+                max_value=st.session_state.tatil_bitis + timedelta(days=60)
             )
             
             submit_h = st.form_submit_button("💾 Harcamayı Kaydet", use_container_width=True)
@@ -341,19 +369,23 @@ elif menu == "💸 Manuel Harcama Ekle":
                         "Bitiş": h_bit
                     })
                     st.success(f"✅ '{aciklama}' ({tutar:.2f} ₺) başarıyla kaydedildi!")
+                    st.rerun()
 
         if st.session_state.harcamalar:
             st.markdown("---")
             st.subheader("📋 Kayıtlı Harcamalar")
             ozet_h = []
             for h in st.session_state.harcamalar:
+                h_b = h.get("Başlangıç", st.session_state.tatil_baslangic)
+                h_s = h.get("Bitiş", st.session_state.tatil_bitis)
+                tarih_str = f"{h_b.strftime('%d.%m')} - {h_s.strftime('%d.%m')}" if isinstance(h_b, (date, datetime)) else f"{h_b}-{h_s}"
                 ozet_h.append({
                     "ID": h["ID"],
                     "Açıklama": h["Açıklama"],
                     "Tutar (₺)": f"{h['Tutar']:,.2f} ₺",
                     "Ödeyen": h["Ödeyen"],
-                    "Kapsam": ", ".join(h["Dahil Olanlar"]) if h["Dahil Olanlar"] else "Evdekiler",
-                    "Tarihler": f"{h['Başlangıç'].strftime('%d.%m')} - {h['Bitiş'].strftime('%d.%m')}"
+                    "Kapsam": ", ".join(h["Dahil Olanlar"]) if h.get("Dahil Olanlar") else "Evdekiler",
+                    "Tarihler": tarih_str
                 })
             st.dataframe(pd.DataFrame(ozet_h), use_container_width=True)
             
@@ -454,14 +486,17 @@ elif menu == "📊 Hesaplaşma & WhatsApp":
             bakiyeler[h["Ödeyen"]] += h["Tutar"]
             toplam_harcanan[h["Ödeyen"]] += h["Tutar"]
             
-            h_bas = h["Başlangıç"]
-            h_bit = h["Bitiş"]
-            h_gun_sayisi = (h_bit - h_bas).days + 1
-            h_gunler = [h_bas + timedelta(days=i) for i in range(h_gun_sayisi)]
+            h_bas = h.get("Başlangıç", st.session_state.tatil_baslangic)
+            h_bit = h.get("Bitiş", st.session_state.tatil_bitis)
+            if isinstance(h_bas, (date, datetime)) and isinstance(h_bit, (date, datetime)):
+                h_gun_sayisi = (h_bit - h_bas).days + 1
+                h_gunler = [h_bas + timedelta(days=i) for i in range(h_gun_sayisi)]
+            else:
+                h_gunler = get_tatil_gunleri()
             
             gecerli_gunler = []
             for gun in h_gunler:
-                o_gun_evdekiler = [k["İsim"] for k in st.session_state.kisiler if k["Giriş"] <= gun <= k["Çıkış"]]
+                o_gun_evdekiler = [k["İsim"] for k in st.session_state.kisiler if k.get("Giriş", st.session_state.tatil_baslangic) <= gun <= k.get("Çıkış", st.session_state.tatil_bitis)]
                 odeyecekler = [k for k in o_gun_evdekiler if k in h["Dahil Olanlar"]] if h.get("Dahil Olanlar") else o_gun_evdekiler
                 if odeyecekler:
                     gecerli_gunler.append((gun, odeyecekler))
