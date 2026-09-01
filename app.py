@@ -21,22 +21,30 @@ st.set_page_config(
 )
 
 # ==========================================
-# 🎨 2. ÖZEL TEMA, YAZI TİPİ (GOOGLE FONTS) VE CSS
+# 🎨 2. ÖZEL TEMA, YAZI TİPİ VE İKON KORUMALI CSS
 # ==========================================
 st.markdown("""
 <style>
+    /* Google Fonts */
     @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap');
 
-    html, body, [class*="css"], .stMarkdown, p, div, span, label, input, button, select {
+    /* Ana Metin ve Tipografi (İkon fontlarını bozmadan) */
+    html, body, [data-testid="stAppViewContainer"], [data-testid="stSidebar"] {
         font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
     }
 
+    .stMarkdown, p, label, .stTextInput > div > div > input, .stNumberInput > div > div > input {
+        font-family: 'Plus Jakarta Sans', sans-serif !important;
+    }
+
+    /* Başlıklar */
     h1, h2, h3, h4, h5, h6 {
         font-family: 'Outfit', sans-serif !important;
         font-weight: 700 !important;
         letter-spacing: -0.02em !important;
     }
 
+    /* Ana Başlık Özel Gradyanı */
     h1 {
         background: linear-gradient(135deg, #00838F 0%, #00ACC1 50%, #FF7043 100%);
         -webkit-background-clip: text;
@@ -45,6 +53,24 @@ st.markdown("""
         padding-bottom: 0.2rem;
     }
 
+    /* 🛡️ Streamlit Sistem İkonlarını Koruma (Yazı olarak çıkmasını engeller) */
+    [data-testid="stIconMaterial"], 
+    .material-symbols-rounded, 
+    .material-symbols-sharp, 
+    .material-symbols-outlined, 
+    [class*="material-symbols"], 
+    [data-testid="stSidebarCollapseButton"] span,
+    [data-testid="stIcon"],
+    button span[class*="material-symbols"] {
+        font-family: 'Material Symbols Rounded', 'Material Symbols Outlined', 'Material Icons' !important;
+        font-style: normal !important;
+        font-variant: normal !important;
+        text-transform: none !important;
+        line-height: 1 !important;
+        display: inline-block !important;
+    }
+
+    /* Kartlar ve Expander Görünümleri */
     div[data-testid="stExpander"] {
         border: 1px solid #E2E8F0 !important;
         border-radius: 14px !important;
@@ -53,6 +79,7 @@ st.markdown("""
         margin-bottom: 12px !important;
     }
 
+    /* Butonlar */
     div.stButton > button {
         border-radius: 10px !important;
         font-family: 'Outfit', sans-serif !important;
@@ -65,12 +92,14 @@ st.markdown("""
         box-shadow: 0 4px 12px rgba(0, 131, 143, 0.25) !important;
     }
 
+    /* Tablo & Veri Çerçevesi */
     div[data-testid="stDataFrame"] {
         border-radius: 12px !important;
         overflow: hidden !important;
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04) !important;
     }
 
+    /* Bilgi & Uyarı Kutuları */
     div[data-testid="stAlert"] {
         border-radius: 12px !important;
         font-weight: 500 !important;
@@ -98,16 +127,13 @@ if 'gemini_api_key' not in st.session_state:
     else:
         st.session_state.gemini_api_key = DEFAULT_GEMINI_API_KEY
 
-# Güvenli Tarih Dönüştürücü (Eski ve yeni verileri hatasız eşitler)
 def to_date_obj(val, default_date):
     if isinstance(val, (date, datetime)):
         return val if isinstance(val, date) else val.date()
     elif isinstance(val, int):
-        # Eski versiyondan kalan 1-14 gün sayıları için otomatik tarih üretme
         return st.session_state.tatil_baslangic + timedelta(days=max(0, val - 1))
     return default_date
 
-# Mevcut verileri güvenli formata dönüştür (Giriş/Geliş KeyError koruması)
 for k in st.session_state.kisiler:
     k_giris_raw = k.get("Giriş") if "Giriş" in k else k.get("Geliş", 1)
     k_cikis_raw = k.get("Çıkış") if "Çıkış" in k else k.get("Gidiş", 14)
