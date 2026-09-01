@@ -1,28 +1,28 @@
 import streamlit as st
 import pandas as pd
 from PIL import Image
-import json
-import os
-import re
-import urllib.parse
+import json, os, re, urllib.parse, requests
 from datetime import datetime, date, timedelta
+import plotly.express as px
+import plotly.graph_objects as go
 from google import genai
-from google.genai import types
 
 # ==========================================
-# 🔑 1. API ANAHTARI VE YAPILANDIRMA
+# 🔑 1. API ANAHTARLARI
 # ==========================================
 DEFAULT_GEMINI_API_KEY = ""
+DEFAULT_OWM_API_KEY = ""   # OpenWeatherMap — opsiyonel
+DEFAULT_SEHIR = "Bodrum"
 
 st.set_page_config(
-    page_title="Akbük Tatil Hesaplayıcı & Takvim", 
-    page_icon="🏖️", 
+    page_title="Akbük Tatil Hesaplayıcı",
+    page_icon="🏖️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ==========================================
-# 🎨 2. ÖZEL TEMA, YAZI TİPİ VE İKON KORUMALI CSS
+# 🎨 2. CSS & FONTS
 # ==========================================
 st.markdown("""
 <style>
@@ -31,17 +31,16 @@ st.markdown("""
     html, body, [data-testid="stAppViewContainer"], [data-testid="stSidebar"] {
         font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
     }
-
-    .stMarkdown, p, label, .stTextInput > div > div > input, .stNumberInput > div > div > input {
+    .stMarkdown, p, label,
+    .stTextInput > div > div > input,
+    .stNumberInput > div > div > input {
         font-family: 'Plus Jakarta Sans', sans-serif !important;
     }
-
     h1, h2, h3, h4, h5, h6 {
         font-family: 'Outfit', sans-serif !important;
         font-weight: 700 !important;
         letter-spacing: -0.02em !important;
     }
-
     h1 {
         background: linear-gradient(135deg, #00838F 0%, #00ACC1 50%, #FF7043 100%);
         -webkit-background-clip: text;
@@ -49,535 +48,508 @@ st.markdown("""
         font-size: 2.2rem !important;
         padding-bottom: 0.2rem;
     }
-
-    [data-testid="stIconMaterial"], 
-    .material-symbols-rounded, 
-    .material-symbols-sharp, 
-    .material-symbols-outlined, 
-    [class*="material-symbols"], 
+    [data-testid="stIconMaterial"],
+    .material-symbols-rounded, .material-symbols-sharp,
+    .material-symbols-outlined, [class*="material-symbols"],
     [data-testid="stSidebarCollapseButton"] span,
     [data-testid="stIcon"],
     button span[class*="material-symbols"] {
-        font-family: 'Material Symbols Rounded', 'Material Symbols Outlined', 'Material Icons' !important;
-        font-style: normal !important;
-        font-variant: normal !important;
-        text-transform: none !important;
-        line-height: 1 !important;
+        font-family: 'Material Symbols Rounded','Material Symbols Outlined','Material Icons' !important;
+        font-style: normal !important; font-variant: normal !important;
+        text-transform: none !important; line-height: 1 !important;
         display: inline-block !important;
     }
-
     div[data-testid="stExpander"] {
         border: 1px solid #E2E8F0 !important;
         border-radius: 14px !important;
         background-color: #FFFFFF !important;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.03) !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.03) !important;
         margin-bottom: 12px !important;
     }
-
     div.stButton > button {
         border-radius: 10px !important;
         font-family: 'Outfit', sans-serif !important;
         font-weight: 600 !important;
         transition: all 0.2s ease-in-out !important;
     }
-    
     div.stButton > button:hover {
         transform: translateY(-1px) !important;
-        box-shadow: 0 4px 12px rgba(0, 131, 143, 0.25) !important;
+        box-shadow: 0 4px 12px rgba(0,131,143,0.25) !important;
     }
-
     div[data-testid="stDataFrame"] {
-        border-radius: 12px !important;
-        overflow: hidden !important;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04) !important;
+        border-radius: 12px !important; overflow: hidden !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04) !important;
     }
-
     div[data-testid="stAlert"] {
-        border-radius: 12px !important;
-        font-weight: 500 !important;
+        border-radius: 12px !important; font-weight: 500 !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 🌐 3. ORTAK CANLI VERİTABANI SİSTEMİ (TÜM KULLANICILAR İÇİN)
+# 🌐 3. ORTAK VERİTABANI
 # ==========================================
 DB_FILE = "tatil_veritabani.json"
+KATEGORILER = ["🛒 Market", "🍽️ Yemek / Restoran", "🍹 İçki / Eğlence",
+               "🚗 Ulaşım", "🏠 Ev Giderleri", "💊 Diğer"]
 
-def tarih_serilestir(obj):
-    if isinstance(obj, (date, datetime)):
-        return obj.isoformat()
-    return obj
+def tarih_ser(obj):
+    return obj.isoformat() if isinstance(obj, (date, datetime)) else obj
 
-def tarih_ayikla(val, default_date):
-    if not val:
-        return default_date
+def tarih_oku(val, default):
+    if not val: return default
     if isinstance(val, (date, datetime)):
         return val if isinstance(val, date) else val.date()
     if isinstance(val, str):
-        try:
-            return date.fromisoformat(val)
-        except Exception:
-            return default_date
+        try: return date.fromisoformat(val)
+        except: return default
     if isinstance(val, int):
-        return default_date + timedelta(days=max(0, val - 1))
-    return default_date
+        return default + timedelta(days=max(0, val - 1))
+    return default
 
-def ortak_verileri_yukle():
+def db_yukle():
     bugun = date.today()
     varsayilan = {
         "tatil_baslangic": bugun.isoformat(),
         "tatil_bitis": (bugun + timedelta(days=13)).isoformat(),
-        "kisiler": [],
-        "harcamalar": []
+        "kisiler": [], "harcamalar": [],
+        "sehir": DEFAULT_SEHIR
     }
-    
     if not os.path.exists(DB_FILE):
         with open(DB_FILE, "w", encoding="utf-8") as f:
             json.dump(varsayilan, f, ensure_ascii=False, indent=2)
         return varsayilan
-    
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f:
-            veri = json.load(f)
-            return veri
-    except Exception:
+            return json.load(f)
+    except:
         return varsayilan
 
-def ortak_verileri_kaydet(kisiler, harcamalar, tatil_bas, tatil_bit):
-    # Tarihleri string (ISO) formatına çevirerek diske yaz
-    kisiler_kayit = []
-    for k in kisiler:
-        kisiler_kayit.append({
-            "İsim": k["İsim"],
-            "Giriş": tarih_serilestir(k.get("Giriş", tatil_bas)),
-            "Çıkış": tarih_serilestir(k.get("Çıkış", tatil_bit)),
-            "Kalış Süresi": k.get("Kalış Süresi", "1 Gün")
-        })
-        
-    harcamalar_kayit = []
-    for h in harcamalar:
-        harcamalar_kayit.append({
-            "ID": h["ID"],
-            "Açıklama": h["Açıklama"],
-            "Tutar": float(h["Tutar"]),
-            "Ödeyen": h["Ödeyen"],
-            "Dahil Olanlar": h.get("Dahil Olanlar", []),
-            "Başlangıç": tarih_serilestir(h.get("Başlangıç", tatil_bas)),
-            "Bitiş": tarih_serilestir(h.get("Bitiş", tatil_bit))
-        })
-        
-    veri_paketi = {
-        "tatil_baslangic": tarih_serilestir(tatil_bas),
-        "tatil_bitis": tarih_serilestir(tatil_bit),
-        "kisiler": kisiler_kayit,
-        "harcamalar": harcamalar_kayit
-    }
-    
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(veri_paketi, f, ensure_ascii=False, indent=2)
-
-# Oturum Başında Ortak Veritabanını Yükle
-veri_db = ortak_verileri_yukle()
-bugun_dt = date.today()
-st.session_state.tatil_baslangic = tarih_ayikla(veri_db.get("tatil_baslangic"), bugun_dt)
-st.session_state.tatil_bitis = tarih_ayikla(veri_db.get("tatil_bitis"), bugun_dt + timedelta(days=13))
-
-# Kişileri Session'a aktar
-st.session_state.kisiler = []
-for k in veri_db.get("kisiler", []):
-    g = tarih_ayikla(k.get("Giriş") or k.get("Geliş"), st.session_state.tatil_baslangic)
-    c = tarih_ayikla(k.get("Çıkış") or k.get("Gidiş"), st.session_state.tatil_bitis)
-    st.session_state.kisiler.append({
+def db_kaydet():
+    kisiler_k = [{
         "İsim": k["İsim"],
-        "Giriş": g,
-        "Çıkış": c,
-        "Kalış Süresi": f"{(c - g).days + 1} Gün"
-    })
+        "Giriş": tarih_ser(k.get("Giriş", st.session_state.tatil_bas)),
+        "Çıkış": tarih_ser(k.get("Çıkış", st.session_state.tatil_bit)),
+        "Kalış Süresi": k.get("Kalış Süresi", "1 Gün")
+    } for k in st.session_state.kisiler]
 
-# Harcamaları Session'a aktar
-st.session_state.harcamalar = []
-for h in veri_db.get("harcamalar", []):
-    hb = tarih_ayikla(h.get("Başlangıç"), st.session_state.tatil_baslangic)
-    hs = tarih_ayikla(h.get("Bitiş"), st.session_state.tatil_bitis)
-    st.session_state.harcamalar.append({
-        "ID": h.get("ID", len(st.session_state.harcamalar) + 1),
-        "Açıklama": h["Açıklama"],
-        "Tutar": float(h["Tutar"]),
-        "Ödeyen": h["Ödeyen"],
+    harcamalar_k = [{
+        "ID": h["ID"], "Açıklama": h["Açıklama"],
+        "Tutar": float(h["Tutar"]), "Ödeyen": h["Ödeyen"],
+        "Kategori": h.get("Kategori", "💊 Diğer"),
         "Dahil Olanlar": h.get("Dahil Olanlar", []),
-        "Başlangıç": hb,
-        "Bitiş": hs
+        "Başlangıç": tarih_ser(h.get("Başlangıç", st.session_state.tatil_bas)),
+        "Bitiş": tarih_ser(h.get("Bitiş", st.session_state.tatil_bit))
+    } for h in st.session_state.harcamalar]
+
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump({
+            "tatil_baslangic": tarih_ser(st.session_state.tatil_bas),
+            "tatil_bitis": tarih_ser(st.session_state.tatil_bit),
+            "kisiler": kisiler_k, "harcamalar": harcamalar_k,
+            "sehir": st.session_state.get("sehir", DEFAULT_SEHIR)
+        }, f, ensure_ascii=False, indent=2)
+
+# ==========================================
+# 🧠 4. SESSION STATE YÜKLEME
+# ==========================================
+db = db_yukle()
+bugun_dt = date.today()
+st.session_state.tatil_bas = tarih_oku(db.get("tatil_baslangic"), bugun_dt)
+st.session_state.tatil_bit = tarih_oku(db.get("tatil_bitis"), bugun_dt + timedelta(days=13))
+st.session_state.sehir = db.get("sehir", DEFAULT_SEHIR)
+
+st.session_state.kisiler = []
+for k in db.get("kisiler", []):
+    g = tarih_oku(k.get("Giriş") or k.get("Geliş"), st.session_state.tatil_bas)
+    c = tarih_oku(k.get("Çıkış") or k.get("Gidiş"), st.session_state.tatil_bit)
+    st.session_state.kisiler.append({
+        "İsim": k["İsim"], "Giriş": g, "Çıkış": c,
+        "Kalış Süresi": f"{(c-g).days+1} Gün"
     })
 
-if 'fisten_okunanlar' not in st.session_state:
+st.session_state.harcamalar = []
+for h in db.get("harcamalar", []):
+    hb = tarih_oku(h.get("Başlangıç"), st.session_state.tatil_bas)
+    hs = tarih_oku(h.get("Bitiş"), st.session_state.tatil_bit)
+    st.session_state.harcamalar.append({
+        "ID": h.get("ID", len(st.session_state.harcamalar)+1),
+        "Açıklama": h["Açıklama"], "Tutar": float(h["Tutar"]),
+        "Ödeyen": h["Ödeyen"],
+        "Kategori": h.get("Kategori", "💊 Diğer"),
+        "Dahil Olanlar": h.get("Dahil Olanlar", []),
+        "Başlangıç": hb, "Bitiş": hs
+    })
+
+if "fisten_okunanlar" not in st.session_state:
     st.session_state.fisten_okunanlar = []
+if "gemini_api_key" not in st.session_state:
+    st.session_state.gemini_api_key = (
+        st.secrets.get("GEMINI_API_KEY", DEFAULT_GEMINI_API_KEY)
+        if hasattr(st, "secrets") else DEFAULT_GEMINI_API_KEY
+    )
+if "owm_api_key" not in st.session_state:
+    st.session_state.owm_api_key = (
+        st.secrets.get("OWM_API_KEY", DEFAULT_OWM_API_KEY)
+        if hasattr(st, "secrets") else DEFAULT_OWM_API_KEY
+    )
 
-if 'gemini_api_key' not in st.session_state:
-    if "GEMINI_API_KEY" in st.secrets:
-        st.session_state.gemini_api_key = st.secrets["GEMINI_API_KEY"]
-    else:
-        st.session_state.gemini_api_key = DEFAULT_GEMINI_API_KEY
-
-def get_tatil_gunleri():
-    bas = st.session_state.tatil_baslangic
-    bit = st.session_state.tatil_bitis
-    if bit < bas:
-        bit = bas
-    gun_sayisi = (bit - bas).days + 1
-    return [bas + timedelta(days=i) for i in range(gun_sayisi)]
+def get_gunler():
+    bas, bit = st.session_state.tatil_bas, st.session_state.tatil_bit
+    if bit < bas: bit = bas
+    return [bas + timedelta(days=i) for i in range((bit-bas).days+1)]
 
 # ==========================================
-# 🤖 4. GEMINI VISION İLE FİŞ OKUMA
+# 🤖 5. GEMINI FİŞ OKUMA
 # ==========================================
-def gemini_ile_fis_oku(gorsel):
+def fis_oku(gorsel):
     api_key = st.session_state.gemini_api_key.strip()
     if not api_key:
-        st.error("⚠️ Lütfen geçerli bir Gemini API Anahtarı giriniz! (Yan menüdeki Ayarlar'dan ekleyebilirsiniz.)")
+        st.error("⚠️ Gemini API Anahtarı girilmemiş! Ayarlar menüsünden ekleyin.")
         return []
-    
     try:
         client = genai.Client(api_key=api_key)
         prompt = """
-        Sen uzman bir fiş/fatura okuma asistanısın.
-        Görseldeki alışveriş fişini incele. Satın alınan ürün/hizmet kalemlerini ve KDV dahil net tutarlarını çıkar.
-        Kurallar:
-        1. "TOPLAM", "KDV", "ARA TOPLAM", "NAKİT", "KREDİ KARTI" gibi genel toplam satırlarını DAHİL ETME.
-        2. Sadece münferit ürün veya hizmet kalemlerini listele.
-        3. Tutar rakamını float olarak yaz (Örn: 45.50).
-        4. Çıktı sadece geçerli bir JSON listesi olmalıdır:
-        [
-            {"Açıklama": "Ekmek 2 Adet", "Tutar": 25.0},
-            {"Açıklama": "Beyaz Peynir", "Tutar": 140.75}
-        ]
+        Görseldeki alışveriş fişindeki ürün/hizmet kalemlerini ve KDV dahil tutarlarını çıkar.
+        TOPLAM, KDV, ARA TOPLAM, NAKİT, KREDİ KARTI satırlarını DAHİL ETME.
+        Sadece ürün kalemlerini JSON listesi olarak döndür:
+        [{"Açıklama": "Ürün Adı", "Tutar": 25.0}]
         """
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[gorsel, prompt]
-        )
-        yanit = response.text.strip()
-        json_eslesme = re.search(r'\[.*\]', yanit, re.DOTALL)
-        if json_eslesme:
-            return json.loads(json_eslesme.group(0))
-        else:
-            temiz = yanit.replace("```json", "").replace("```", "").strip()
-            return json.loads(temiz)
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash", contents=[gorsel, prompt])
+        yanit = resp.text.strip()
+        m = re.search(r'\[.*\]', yanit, re.DOTALL)
+        raw = m.group(0) if m else yanit.replace("```json","").replace("```","").strip()
+        return json.loads(raw)
     except Exception as e:
-        st.error(f"Fiş okunurken hata oluştu: {str(e)}")
+        st.error(f"Fiş okunurken hata: {e}")
         return []
 
 # ==========================================
-# 📱 5. ARAYÜZ VE MENÜ
+# 🌤️ 6. HAVA DURUMU
+# ==========================================
+def hava_durumu_getir(sehir, api_key):
+    if not api_key or not api_key.strip():
+        return None
+    try:
+        url = f"https://api.openweathermap.org/data/2.5/weather?q={sehir}&appid={api_key}&units=metric&lang=tr"
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            return r.json()
+    except:
+        pass
+    return None
+
+# ==========================================
+# 📊 7. BAKİYE HESAPLAMA (merkezi fonksiyon)
+# ==========================================
+def hesapla_bakiyeler():
+    kisiler_dict = {k["İsim"]: k for k in st.session_state.kisiler}
+    bakiyeler = {k: 0.0 for k in kisiler_dict}
+    harcanan = {k: 0.0 for k in kisiler_dict}
+    kullanim = {k: 0.0 for k in kisiler_dict}
+
+    for h in st.session_state.harcamalar:
+        odeyen = h["Ödeyen"]
+        if odeyen not in bakiyeler:
+            st.warning(f"⚠️ '{odeyen}' kişi listesinde bulunamadı — '{h['Açıklama']}' harcaması atlandı.")
+            continue
+
+        bakiyeler[odeyen] += h["Tutar"]
+        harcanan[odeyen] += h["Tutar"]
+
+        hb = h.get("Başlangıç", st.session_state.tatil_bas)
+        hs = h.get("Bitiş", st.session_state.tatil_bit)
+        gunler = [hb + timedelta(days=i) for i in range((hs-hb).days+1)]
+
+        gecerli = []
+        for gun in gunler:
+            evde = [k for k, v in kisiler_dict.items()
+                    if v.get("Giriş", st.session_state.tatil_bas) <= gun
+                    <= v.get("Çıkış", st.session_state.tatil_bit)]
+            odeyecek = [k for k in evde if k in h["Dahil Olanlar"]] if h.get("Dahil Olanlar") else evde
+            if odeyecek:
+                gecerli.append((gun, odeyecek))
+
+        if not gecerli:
+            hedef = h["Dahil Olanlar"] if h.get("Dahil Olanlar") else list(kisiler_dict.keys())
+            hedef = [k for k in hedef if k in bakiyeler]
+            if hedef:
+                pay = h["Tutar"] / len(hedef)
+                for k in hedef:
+                    bakiyeler[k] -= pay
+                    kullanim[k] += pay
+        else:
+            gunluk = h["Tutar"] / len(gecerli)
+            for gun, odeyecek in gecerli:
+                pay = gunluk / len(odeyecek)
+                for k in odeyecek:
+                    if k in bakiyeler:
+                        bakiyeler[k] -= pay
+                        kullanim[k] += pay
+
+    return bakiyeler, harcanan, kullanim
+
+# ==========================================
+# 📱 8. ARAYÜZ
 # ==========================================
 st.title("🏖️ Tatil Harcama & Ev Takvimi")
 
-# Canlı Senkronizasyon Butonu (Üst Çubuk)
-col_sync1, col_sync2 = st.columns([3, 1])
-with col_sync1:
-    st.caption("🟢 **Canlı Ortak Havuz Aktif:** Arkadaşlarınızın eklediği harcamalar ve kişiler otomatik senkronize olur.")
-with col_sync2:
-    if st.button("🔄 Canlı Verileri Yenile", use_container_width=True):
+col_s1, col_s2 = st.columns([3, 1])
+with col_s1:
+    st.caption("🟢 **Canlı Ortak Havuz Aktif** — Herkesin eklediği veriler anında senkronize olur.")
+with col_s2:
+    if st.button("🔄 Yenile", use_container_width=True):
         st.rerun()
 
-menu = st.sidebar.radio(
-    "Menü", 
-    [
-        "📅 Ev Takvimi & Doluluk", 
-        "👥 Kişileri Yönet", 
-        "💸 Manuel Harcama Ekle", 
-        "📸 Fişten Yapay Zeka ile Ekle", 
-        "📊 Hesaplaşma & WhatsApp", 
-        "⚙️ Ayarlar & Yedekleme"
-    ]
-)
+# ---- Sidebar Hava Durumu ----
+owm_key = st.session_state.owm_api_key.strip()
+if owm_key:
+    hava = hava_durumu_getir(st.session_state.sehir, owm_key)
+    if hava:
+        desc = hava["weather"][0]["description"].capitalize()
+        temp = hava["main"]["temp"]
+        nem  = hava["main"]["humidity"]
+        ruz  = hava["wind"]["speed"]
+        st.sidebar.markdown("---")
+        st.sidebar.markdown(f"### 🌤️ {st.session_state.sehir} Hava Durumu")
+        st.sidebar.markdown(f"**{desc}** — 🌡️ **{temp:.0f}°C**")
+        st.sidebar.markdown(f"💧 Nem: %{nem} &nbsp;&nbsp; 💨 Rüzgar: {ruz} m/s")
+        st.sidebar.markdown("---")
 
-gunler_listesi = get_tatil_gunleri()
+menu = st.sidebar.radio("Menü", [
+    "📅 Ev Takvimi & Doluluk",
+    "👥 Kişileri Yönet",
+    "💸 Manuel Harcama Ekle",
+    "📸 Fişten Yapay Zeka ile Ekle",
+    "📊 Hesaplaşma & WhatsApp",
+    "📈 Harcama Grafikleri",
+    "⚙️ Ayarlar & Yedekleme"
+])
+
+gunler = get_gunler()
 
 # -------------------------------------------------------------------
-# MENÜ 1: EV TAKVİMİ & DOLULUK ÇİZELGESİ
+# MENÜ 1: TAKVİM
 # -------------------------------------------------------------------
 if menu == "📅 Ev Takvimi & Doluluk":
-    st.header("📅 Kim Hangi Gün Evde? (Doluluk Çizelgesi)")
-    
-    col_t1, col_t2 = st.columns([2, 1])
-    with col_t1:
-        st.info(f"🗓️ **Tatil Aralığı:** {st.session_state.tatil_baslangic.strftime('%d.%m.%Y')} — {st.session_state.tatil_bitis.strftime('%d.%m.%Y')} (Toplam **{len(gunler_listesi)} Gün**)")
-    with col_t2:
-        st.metric("Evdeki Toplam Kayıtlı Kişi", len(st.session_state.kisiler))
-    
+    st.header("📅 Kim Hangi Gün Evde?")
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.info(f"🗓️ **Tatil:** {st.session_state.tatil_bas.strftime('%d.%m.%Y')} — {st.session_state.tatil_bit.strftime('%d.%m.%Y')} ({len(gunler)} Gün)")
+    with c2:
+        st.metric("Kayıtlı Kişi", len(st.session_state.kisiler))
+
     if not st.session_state.kisiler:
-        st.warning("Henüz kişi eklenmedi. Lütfen '👥 Kişileri Yönet' menüsünden evde kalacak kişileri ekleyin.")
+        st.warning("Henüz kişi eklenmedi. '👥 Kişileri Yönet' menüsünden başlayın.")
     else:
-        matris_data = {}
-        gun_basliklari = [g.strftime("%d %b\n(%a)") for g in gunler_listesi]
-        
+        gun_bas = [g.strftime("%d %b\n(%a)") for g in gunler]
+        matris = {}
         for k in st.session_state.kisiler:
-            kisi_adi = k["İsim"]
-            k_giris = k.get("Giriş", st.session_state.tatil_baslangic)
-            k_cikis = k.get("Çıkış", st.session_state.tatil_bitis)
-            
+            g_in  = k.get("Giriş", st.session_state.tatil_bas)
+            g_out = k.get("Çıkış", st.session_state.tatil_bit)
             satir = []
-            for g in gunler_listesi:
-                if k_giris <= g <= k_cikis:
-                    satir.append("🟢 Evde")
-                else:
-                    satir.append("—")
-            matris_data[kisi_adi] = satir
-            
-        df_takvim = pd.DataFrame(matris_data, index=gun_basliklari).T
-        
-        gunluk_sayilar = []
-        for g in gunler_listesi:
-            sayi = sum(1 for k in st.session_state.kisiler if k.get("Giriş", st.session_state.tatil_baslangic) <= g <= k.get("Çıkış", st.session_state.tatil_bitis))
-            gunluk_sayilar.append(f"{sayi} Kişi")
-        
-        df_takvim.loc["👥 TOPLAM KİŞİ"] = gunluk_sayilar
-        
-        st.subheader("📊 Gün Gün Evde Olanlar Matrisi")
-        st.dataframe(df_takvim, use_container_width=True)
-        
+            for g in gunler:
+                if g == g_in and g == g_out: satir.append("📥📤 Tek Gün")
+                elif g == g_in:              satir.append("📥 Giriş")
+                elif g == g_out:             satir.append("📤 Çıkış")
+                elif g_in < g < g_out:       satir.append("✅ Tam Gün")
+                else:                        satir.append("—")
+            matris[k["İsim"]] = satir
+
+        df_t = pd.DataFrame(matris, index=gun_bas).T
+        df_t.loc["👥 TOPLAM"] = [
+            f"{sum(1 for k in st.session_state.kisiler if k.get('Giriş', st.session_state.tatil_bas) <= g <= k.get('Çıkış', st.session_state.tatil_bit))} Kişi"
+            for g in gunler
+        ]
+        st.dataframe(df_t, use_container_width=True)
+
         st.markdown("---")
         st.subheader("🔍 Güne Göre Evdekileri Gör")
-        secili_gun = st.date_input(
-            "Tarih Seçin:", 
-            value=st.session_state.tatil_baslangic,
-            min_value=st.session_state.tatil_baslangic,
-            max_value=st.session_state.tatil_bitis
-        )
-        
-        o_gun_evde = [k["İsim"] for k in st.session_state.kisiler if k.get("Giriş", st.session_state.tatil_baslangic) <= secili_gun <= k.get("Çıkış", st.session_state.tatil_bitis)]
-        if o_gun_evde:
-            st.success(f"**{secili_gun.strftime('%d.%m.%Y %A')}** günü evde olanlar (**{len(o_gun_evde)} Kişi**): " + ", ".join([f"**{isim}**" for isim in o_gun_evde]))
+        sec_gun = st.date_input("Tarih Seçin:",
+            value=st.session_state.tatil_bas,
+            min_value=st.session_state.tatil_bas,
+            max_value=st.session_state.tatil_bit)
+        evde = [k["İsim"] for k in st.session_state.kisiler
+                if k.get("Giriş", st.session_state.tatil_bas) <= sec_gun <= k.get("Çıkış", st.session_state.tatil_bit)]
+        if evde:
+            st.success(f"**{sec_gun.strftime('%d.%m.%Y %A')}** — Evde: **{', '.join(evde)}** ({len(evde)} kişi)")
         else:
-            st.warning(f"**{secili_gun.strftime('%d.%m.%Y')}** günü evde kimse görünmüyor.")
+            st.warning(f"**{sec_gun.strftime('%d.%m.%Y')}** günü evde kimse görünmüyor.")
 
 # -------------------------------------------------------------------
 # MENÜ 2: KİŞİLERİ YÖNET
 # -------------------------------------------------------------------
 elif menu == "👥 Kişileri Yönet":
     st.header("👥 Kişi Ekle & Takvim Tarihlerini Seç")
-    
     col1, col2 = st.columns([1, 1])
     with col1:
-        with st.form("kisi_ekle_takvim_form", clear_on_submit=True):
-            isim = st.text_input("Kişi Adı (Örn: Baran, Bahar, Ali)").strip()
-            
-            st.markdown("**🗓️ Eve Giriş ve Çıkış Tarihi:**")
-            tarih_araligi = st.date_input(
-                "Tarih Aralığı Seçin",
-                value=(st.session_state.tatil_baslangic, st.session_state.tatil_bitis),
-                min_value=st.session_state.tatil_baslangic - timedelta(days=60),
-                max_value=st.session_state.tatil_bitis + timedelta(days=60)
-            )
-            
-            submit_kisi = st.form_submit_button("➕ Kişiyi Takvime Ekle", use_container_width=True)
-            
-            if submit_kisi:
+        with st.form("kisi_form", clear_on_submit=True):
+            isim = st.text_input("Kişi Adı", placeholder="Baran, Bahar, Ali...").strip()
+            st.markdown("**🗓️ Giriş ve Çıkış Tarihi:**")
+            aralik = st.date_input("Tarih Aralığı",
+                value=(st.session_state.tatil_bas, st.session_state.tatil_bit),
+                min_value=st.session_state.tatil_bas - timedelta(days=60),
+                max_value=st.session_state.tatil_bit + timedelta(days=60))
+            ekle = st.form_submit_button("➕ Kişiyi Ekle", use_container_width=True)
+            if ekle:
                 if not isim:
-                    st.error("Lütfen bir isim yazın!")
-                elif isinstance(tarih_araligi, (list, tuple)) and len(tarih_araligi) == 2:
-                    k_giris, k_cikis = tarih_araligi
-                    mevcutlar = [k["İsim"].lower() for k in st.session_state.kisiler]
-                    if isim.lower() in mevcutlar:
-                        st.warning(f"'{isim}' zaten ekli!")
-                    else:
-                        st.session_state.kisiler.append({
-                            "İsim": isim, 
-                            "Giriş": k_giris, 
-                            "Çıkış": k_cikis,
-                            "Kalış Süresi": f"{(k_cikis - k_giris).days + 1} Gün"
-                        })
-                        ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
-                        st.success(f"✅ {isim} ortak havuza kaydedildi!")
-                        st.rerun()
-                elif isinstance(tarih_araligi, (list, tuple)) and len(tarih_araligi) == 1:
-                    k_giris = k_cikis = tarih_araligi[0]
+                    st.error("İsim boş olamaz!")
+                elif isim.lower() in [k["İsim"].lower() for k in st.session_state.kisiler]:
+                    st.warning(f"'{isim}' zaten ekli!")
+                elif isinstance(aralik, (list,tuple)) and len(aralik)==2:
+                    g, c = aralik
                     st.session_state.kisiler.append({
-                        "İsim": isim, 
-                        "Giriş": k_giris, 
-                        "Çıkış": k_cikis,
-                        "Kalış Süresi": "1 Gün"
+                        "İsim": isim, "Giriş": g, "Çıkış": c,
+                        "Kalış Süresi": f"{(c-g).days+1} Gün"
                     })
-                    ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
-                    st.success(f"✅ {isim} ortak havuza kaydedildi!")
+                    db_kaydet()
+                    st.success(f"✅ {isim} ({g.strftime('%d.%m')} – {c.strftime('%d.%m')}) eklendi!")
                     st.rerun()
                 else:
-                    st.error("Lütfen hem giriş hem çıkış tarihini seçiniz!")
+                    st.error("Lütfen hem giriş hem çıkış tarihini seçin!")
 
     with col2:
-        st.subheader("📋 Kayıtlı Kişiler (Ortak Liste)")
+        st.subheader("📋 Kayıtlı Kişiler")
         if st.session_state.kisiler:
-            df_goster = []
-            for k in st.session_state.kisiler:
-                giris_val = k.get("Giriş", st.session_state.tatil_baslangic)
-                cikis_val = k.get("Çıkış", st.session_state.tatil_bitis)
-                df_goster.append({
-                    "İsim": k["İsim"],
-                    "Giriş Tarihi": giris_val.strftime("%d.%m.%Y") if isinstance(giris_val, (date, datetime)) else str(giris_val),
-                    "Çıkış Tarihi": cikis_val.strftime("%d.%m.%Y") if isinstance(cikis_val, (date, datetime)) else str(cikis_val),
-                    "Kalış Süresi": k.get("Kalış Süresi", "1 Gün")
-                })
-            st.dataframe(pd.DataFrame(df_goster), use_container_width=True)
-            
-            kisi_sil = st.selectbox("🗑️ Silinecek Kişi:", [k["İsim"] for k in st.session_state.kisiler])
+            df_k = pd.DataFrame([{
+                "İsim": k["İsim"],
+                "Giriş": k["Giriş"].strftime("%d.%m.%Y"),
+                "Çıkış": k["Çıkış"].strftime("%d.%m.%Y"),
+                "Kalış": k.get("Kalış Süresi","")
+            } for k in st.session_state.kisiler])
+            st.dataframe(df_k, use_container_width=True)
+            sil_k = st.selectbox("🗑️ Silinecek Kişi:", [k["İsim"] for k in st.session_state.kisiler])
             if st.button("❌ Seçili Kişiyi Sil"):
-                st.session_state.kisiler = [k for k in st.session_state.kisiler if k["İsim"] != kisi_sil]
-                st.session_state.harcamalar = [h for h in st.session_state.harcamalar if h["Ödeyen"] != kisi_sil]
-                ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
+                st.session_state.kisiler = [k for k in st.session_state.kisiler if k["İsim"] != sil_k]
+                st.session_state.harcamalar = [h for h in st.session_state.harcamalar if h["Ödeyen"] != sil_k]
+                db_kaydet()
                 st.rerun()
         else:
             st.info("Henüz kişi eklenmedi.")
 
 # -------------------------------------------------------------------
-# MENÜ 3: MANUEL HARCAMA EKLE
+# MENÜ 3: MANUEL HARCAMA
 # -------------------------------------------------------------------
 elif menu == "💸 Manuel Harcama Ekle":
     st.header("💸 Manuel Harcama Ekle")
-    
     if not st.session_state.kisiler:
-        st.warning("⚠️ Önce 'Kişileri Yönet' menüsünden kişileri ekleyin!")
+        st.warning("⚠️ Önce '👥 Kişileri Yönet' menüsünden kişileri ekleyin!")
     else:
-        kisi_isimleri = [k["İsim"] for k in st.session_state.kisiler]
-        
-        with st.form("manuel_harcama_form", clear_on_submit=True):
-            aciklama = st.text_input("Neye Harcandı?", placeholder="Örn: Akşam Yemeği, Su, Tekila, Kahvaltılık").strip()
-            tutar = st.number_input("Tutar (₺)", min_value=0.0, step=10.0, format="%.2f")
-            odeyen = st.selectbox("Parayı Kim Ödedi?", kisi_isimleri)
-            
-            st.markdown("**🎯 Bu harcama KİMLERİ kapsıyor?**")
-            st.caption("Boş bırakırsanız seçilen tarihlerde evde olan herkese bölünür. Özel harcamalar için sadece tüketenleri seçin.")
-            dahil_olanlar = st.multiselect("Dahil Olan Kişiler (Opsiyonel)", options=kisi_isimleri)
-            
-            st.markdown("**📅 Harcamanın Geçerli Olduğu Tarih Aralığı:**")
-            harcama_tarihleri = st.date_input(
-                "Tarih Aralığı (Tek gün için aynı tarihi iki kez seçin)",
-                value=(st.session_state.tatil_baslangic, st.session_state.tatil_bitis),
-                min_value=st.session_state.tatil_baslangic - timedelta(days=60),
-                max_value=st.session_state.tatil_bitis + timedelta(days=60)
-            )
-            
-            submit_h = st.form_submit_button("💾 Harcamayı Ortak Havuza Kaydet", use_container_width=True)
-            if submit_h:
-                if not aciklama or tutar <= 0:
-                    st.error("Lütfen açıklama ve geçerli bir tutar girin!")
-                else:
-                    if isinstance(harcama_tarihleri, (list, tuple)) and len(harcama_tarihleri) == 2:
-                        h_bas, h_bit = harcama_tarihleri
-                    elif isinstance(harcama_tarihleri, (list, tuple)) and len(harcama_tarihleri) == 1:
-                        h_bas = h_bit = harcama_tarihleri[0]
-                    else:
-                        h_bas = h_bit = harcama_tarihleri
+        isimler = [k["İsim"] for k in st.session_state.kisiler]
+        with st.form("harcama_form", clear_on_submit=True):
+            aciklama = st.text_input("Neye Harcandı?", placeholder="Market, Akşam Yemeği, Tekila...").strip()
+            col_t, col_k = st.columns([1, 1])
+            with col_t:
+                tutar = st.number_input("Tutar (₺)", min_value=0.0, step=10.0, format="%.2f")
+            with col_k:
+                kategori = st.selectbox("Kategori", KATEGORILER)
+            odeyen = st.selectbox("Parayı Kim Ödedi?", isimler)
 
+            st.markdown("**🎯 Kimler dahil? (Boşsa evdeki herkes)**")
+            dahil = st.multiselect("Dahil Olan Kişiler (Opsiyonel)", options=isimler)
+            st.markdown("**📅 Hangi tarih aralığını kapsıyor?**")
+            tar = st.date_input("Tarih Aralığı",
+                value=(st.session_state.tatil_bas, st.session_state.tatil_bit),
+                min_value=st.session_state.tatil_bas - timedelta(days=60),
+                max_value=st.session_state.tatil_bit + timedelta(days=60))
+            kaydet = st.form_submit_button("💾 Ortak Havuza Kaydet", use_container_width=True)
+            if kaydet:
+                if not aciklama or tutar <= 0:
+                    st.error("Açıklama ve geçerli bir tutar giriniz!")
+                else:
+                    hb, hs = (tar if isinstance(tar,(list,tuple)) and len(tar)==2
+                               else (tar[0], tar[0]) if isinstance(tar,(list,tuple)) else (tar, tar))
                     st.session_state.harcamalar.append({
-                        "ID": len(st.session_state.harcamalar) + 1,
-                        "Açıklama": aciklama,
-                        "Tutar": tutar,
-                        "Ödeyen": odeyen,
-                        "Dahil Olanlar": dahil_olanlar,
-                        "Başlangıç": h_bas,
-                        "Bitiş": h_bit
+                        "ID": len(st.session_state.harcamalar)+1,
+                        "Açıklama": aciklama, "Tutar": tutar,
+                        "Ödeyen": odeyen, "Kategori": kategori,
+                        "Dahil Olanlar": dahil, "Başlangıç": hb, "Bitiş": hs
                     })
-                    ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
-                    st.success(f"✅ '{aciklama}' ({tutar:.2f} ₺) ortak havuza kaydedildi!")
+                    db_kaydet()
+                    st.success(f"✅ '{aciklama}' ({tutar:.2f} ₺) kaydedildi!")
                     st.rerun()
 
         if st.session_state.harcamalar:
             st.markdown("---")
-            st.subheader("📋 Kayıtlı Harcamalar (Ortak Liste)")
-            ozet_h = []
+            st.subheader("📋 Kayıtlı Harcamalar")
+            ozet = []
             for h in st.session_state.harcamalar:
-                h_b = h.get("Başlangıç", st.session_state.tatil_baslangic)
-                h_s = h.get("Bitiş", st.session_state.tatil_bitis)
-                tarih_str = f"{h_b.strftime('%d.%m')} - {h_s.strftime('%d.%m')}" if isinstance(h_b, (date, datetime)) else f"{h_b}-{h_s}"
-                ozet_h.append({
-                    "ID": h["ID"],
-                    "Açıklama": h["Açıklama"],
+                hb = h.get("Başlangıç", st.session_state.tatil_bas)
+                hs = h.get("Bitiş", st.session_state.tatil_bit)
+                tar_str = f"{hb.strftime('%d.%m')} – {hs.strftime('%d.%m')}" if isinstance(hb, (date,datetime)) else f"{hb}–{hs}"
+                ozet.append({
+                    "ID": h["ID"], "Açıklama": h["Açıklama"],
                     "Tutar (₺)": f"{h['Tutar']:,.2f} ₺",
+                    "Kategori": h.get("Kategori","—"),
                     "Ödeyen": h["Ödeyen"],
                     "Kapsam": ", ".join(h["Dahil Olanlar"]) if h.get("Dahil Olanlar") else "Evdekiler",
-                    "Tarihler": tarih_str
+                    "Tarihler": tar_str
                 })
-            st.dataframe(pd.DataFrame(ozet_h), use_container_width=True)
-            
-            harcama_sil_id = st.selectbox(
-                "🗑️ Silinecek Harcama:", 
-                [f"#{h['ID']} - {h['Açıklama']} ({h['Tutar']:.2f} ₺)" for h in st.session_state.harcamalar]
-            )
+            st.dataframe(pd.DataFrame(ozet), use_container_width=True)
+            st.metric("Toplam Harcama", f"{sum(h['Tutar'] for h in st.session_state.harcamalar):,.2f} ₺")
+            sil_h = st.selectbox("🗑️ Silinecek Harcama:",
+                [f"#{h['ID']} – {h['Açıklama']} ({h['Tutar']:.2f} ₺)" for h in st.session_state.harcamalar])
             if st.button("❌ Seçili Harcamayı Sil"):
-                secili_id = int(harcama_sil_id.split(" - ")[0].replace("#", ""))
-                st.session_state.harcamalar = [h for h in st.session_state.harcamalar if h["ID"] != secili_id]
-                ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
+                sid = int(sil_h.split(" – ")[0].replace("#",""))
+                st.session_state.harcamalar = [h for h in st.session_state.harcamalar if h["ID"] != sid]
+                db_kaydet()
                 st.rerun()
 
 # -------------------------------------------------------------------
-# MENÜ 4: FİŞTEN YAPAY ZEKA İLE EKLE
+# MENÜ 4: FİŞTEN AI İLE EKLE
 # -------------------------------------------------------------------
 elif menu == "📸 Fişten Yapay Zeka ile Ekle":
     st.header("📸 Fiş Fotoğrafından Otomatik Oku")
     st.info("Market, restoran veya tekel fişinizin fotoğrafını yükleyin. Gemini AI kalemleri otomatik ayıracaktır.")
-    
     if not st.session_state.kisiler:
-        st.warning("⚠️ Lütfen önce 'Kişileri Yönet' menüsünden kişileri ekleyin!")
+        st.warning("⚠️ Önce '👥 Kişileri Yönet' menüsünden kişileri ekleyin!")
     else:
-        kisi_isimleri = [k["İsim"] for k in st.session_state.kisiler]
-        yuklenen_fis = st.file_uploader("Fiş Görseli Seç veya Çek", type=["jpg", "jpeg", "png"])
-        
-        if yuklenen_fis is not None:
-            gorsel = Image.open(yuklenen_fis)
+        isimler = [k["İsim"] for k in st.session_state.kisiler]
+        yuklenen = st.file_uploader("Fiş Görseli Seç veya Çek", type=["jpg","jpeg","png"])
+        if yuklenen:
+            gorsel = Image.open(yuklenen)
             st.image(gorsel, caption="Yüklenen Fiş", use_container_width=True)
-            
             if st.button("🔍 Fişi Yapay Zeka ile Tara", type="primary", use_container_width=True):
-                with st.spinner("Gemini Yapay Zeka fişi inceliyor ve kalemleri ayırıyor..."):
-                    okunan_veriler = gemini_ile_fis_oku(gorsel)
-                    if okunan_veriler:
-                        st.session_state.fisten_okunanlar = okunan_veriler
-                        st.success(f"🎉 {len(okunan_veriler)} adet harcama kalemi başarıyla okundu!")
+                with st.spinner("Gemini fişi inceliyor..."):
+                    okunan = fis_oku(gorsel)
+                    if okunan:
+                        st.session_state.fisten_okunanlar = okunan
+                        st.success(f"🎉 {len(okunan)} kalem okundu!")
                     else:
-                        st.warning("Fişte okunabilir kalem bulunamadı.")
+                        st.warning("Okunabilir kalem bulunamadı.")
 
         if st.session_state.fisten_okunanlar:
             st.markdown("---")
-            st.subheader("🛒 Okunan Kalemleri Özelleştir ve Kaydet")
-            
+            st.subheader("🛒 Okunan Kalemleri Düzenle & Kaydet")
             for i, kalem in enumerate(list(st.session_state.fisten_okunanlar)):
-                with st.expander(f"📌 {kalem.get('Açıklama', 'Ürün')} — {kalem.get('Tutar', 0.0):.2f} ₺", expanded=True):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        kalem_adi = st.text_input("Ürün Adı", value=kalem.get('Açıklama', ''), key=f"ad_{i}")
-                        kalem_tutar = st.number_input("Tutar (₺)", value=float(kalem.get('Tutar', 0.0)), format="%.2f", key=f"tut_{i}")
-                        odeyen_fis = st.selectbox("Parayı Kim Ödedi?", kisi_isimleri, key=f"odeyen_{i}")
-                    with col2:
-                        dahiller_fis = st.multiselect("Kimlere Bölünsün? (Boşsa Herkes)", kisi_isimleri, key=f"dahil_{i}")
-                        tarih_fis = st.date_input(
-                            "Kullanım Tarihleri", 
-                            value=(st.session_state.tatil_baslangic, st.session_state.tatil_bitis),
-                            key=f"tarih_{i}"
-                        )
-                    
-                    col_b1, col_b2 = st.columns(2)
-                    with col_b1:
-                        if st.button(f"✅ Harcamalara Ekle", key=f"ekle_{i}", use_container_width=True):
-                            if isinstance(tarih_fis, (list, tuple)) and len(tarih_fis) == 2:
-                                h_b, h_s = tarih_fis
-                            elif isinstance(tarih_fis, (list, tuple)) and len(tarih_fis) == 1:
-                                h_b = h_s = tarih_fis[0]
-                            else:
-                                h_b = h_s = tarih_fis
-
+                with st.expander(f"📌 {kalem.get('Açıklama','Ürün')} — {kalem.get('Tutar',0.0):.2f} ₺", expanded=True):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        adi   = st.text_input("Ürün Adı", value=kalem.get("Açıklama",""), key=f"a{i}")
+                        tutar = st.number_input("Tutar (₺)", value=float(kalem.get("Tutar",0)), format="%.2f", key=f"t{i}")
+                        odeyen_f = st.selectbox("Parayı Kim Ödedi?", isimler, key=f"o{i}")
+                    with c2:
+                        kat_f  = st.selectbox("Kategori", KATEGORILER, key=f"k{i}")
+                        dahil_f = st.multiselect("Kimlere? (Boşsa Herkes)", isimler, key=f"d{i}")
+                        tar_f  = st.date_input("Tarih Aralığı",
+                            value=(st.session_state.tatil_bas, st.session_state.tatil_bit), key=f"tr{i}")
+                    cb1, cb2 = st.columns(2)
+                    with cb1:
+                        if st.button("✅ Ekle", key=f"e{i}", use_container_width=True):
+                            hb, hs = (tar_f if isinstance(tar_f,(list,tuple)) and len(tar_f)==2
+                                       else (tar_f[0], tar_f[0]) if isinstance(tar_f,(list,tuple)) else (tar_f, tar_f))
                             st.session_state.harcamalar.append({
-                                "ID": len(st.session_state.harcamalar) + 1,
-                                "Açıklama": kalem_adi,
-                                "Tutar": kalem_tutar,
-                                "Ödeyen": odeyen_fis,
-                                "Dahil Olanlar": dahiller_fis,
-                                "Başlangıç": h_b,
-                                "Bitiş": h_s
+                                "ID": len(st.session_state.harcamalar)+1,
+                                "Açıklama": adi, "Tutar": tutar,
+                                "Ödeyen": odeyen_f, "Kategori": kat_f,
+                                "Dahil Olanlar": dahil_f, "Başlangıç": hb, "Bitiş": hs
                             })
                             st.session_state.fisten_okunanlar.pop(i)
-                            ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
+                            db_kaydet()
                             st.rerun()
-                    with col_b2:
-                        if st.button(f"🗑️ Yoksay", key=f"sil_{i}", use_container_width=True):
+                    with cb2:
+                        if st.button("🗑️ Yoksay", key=f"y{i}", use_container_width=True):
                             st.session_state.fisten_okunanlar.pop(i)
                             st.rerun()
 
@@ -586,165 +558,230 @@ elif menu == "📸 Fişten Yapay Zeka ile Ekle":
 # -------------------------------------------------------------------
 elif menu == "📊 Hesaplaşma & WhatsApp":
     st.header("📊 Kim Kime Ne Kadar Ödemeli?")
-    
     if not st.session_state.kisiler or not st.session_state.harcamalar:
-        st.info("Hesaplama yapabilmek için en az bir kişi ve bir harcama girmelisiniz.")
+        st.info("En az bir kişi ve bir harcama girmelisiniz.")
     else:
-        bakiyeler = {k["İsim"]: 0.0 for k in st.session_state.kisiler}
-        toplam_harcanan = {k["İsim"]: 0.0 for k in st.session_state.kisiler}
-        kisi_kullanim_payi = {k["İsim"]: 0.0 for k in st.session_state.kisiler}
-        
-        for h in st.session_state.harcamalar:
-            bakiyeler[h["Ödeyen"]] += h["Tutar"]
-            toplam_harcanan[h["Ödeyen"]] += h["Tutar"]
-            
-            h_bas = h.get("Başlangıç", st.session_state.tatil_baslangic)
-            h_bit = h.get("Bitiş", st.session_state.tatil_bitis)
-            if isinstance(h_bas, (date, datetime)) and isinstance(h_bit, (date, datetime)):
-                h_gun_sayisi = (h_bit - h_bas).days + 1
-                h_gunler = [h_bas + timedelta(days=i) for i in range(h_gun_sayisi)]
-            else:
-                h_gunler = get_tatil_gunleri()
-            
-            gecerli_gunler = []
-            for gun in h_gunler:
-                o_gun_evdekiler = [k["İsim"] for k in st.session_state.kisiler if k.get("Giriş", st.session_state.tatil_baslangic) <= gun <= k.get("Çıkış", st.session_state.tatil_bitis)]
-                odeyecekler = [k for k in o_gun_evdekiler if k in h["Dahil Olanlar"]] if h.get("Dahil Olanlar") else o_gun_evdekiler
-                if odeyecekler:
-                    gecerli_gunler.append((gun, odeyecekler))
-            
-            if not gecerli_gunler:
-                hedef = h["Dahil Olanlar"] if h.get("Dahil Olanlar") else [k["İsim"] for k in st.session_state.kisiler]
-                kisi_basi = h["Tutar"] / len(hedef)
-                for k in hedef:
-                    bakiyeler[k] -= kisi_basi
-                    kisi_kullanim_payi[k] += kisi_basi
-            else:
-                gunluk_maliyet = h["Tutar"] / len(gecerli_gunler)
-                for gun, odeyecekler in gecerli_gunler:
-                    kisi_basi = gunluk_maliyet / len(odeyecekler)
-                    for k in odeyecekler:
-                        bakiyeler[k] -= kisi_basi
-                        kisi_kullanim_payi[k] += kisi_basi
+        bakiyeler, harcanan, kullanim = hesapla_bakiyeler()
 
-        # Net Durum Tablosu
-        tablo_data = []
+        tablo = []
         for k in st.session_state.kisiler:
             isim = k["İsim"]
-            net = bakiyeler[isim]
+            net  = bakiyeler.get(isim, 0)
             durum = "🟢 Alacaklı" if net > 0.01 else ("🔴 Borçlu" if net < -0.01 else "⚪ Ödeşti")
-            tablo_data.append({
+            tablo.append({
                 "Kişi": isim,
-                "Ödediği (₺)": f"{toplam_harcanan[isim]:,.2f} ₺",
-                "Kullanım Payı (₺)": f"{kisi_kullanim_payi[isim]:,.2f} ₺",
+                "Ödediği (₺)": f"{harcanan.get(isim,0):,.2f} ₺",
+                "Kullanım Payı (₺)": f"{kullanim.get(isim,0):,.2f} ₺",
                 "Net Bakiye (₺)": f"{net:+,.2f} ₺",
                 "Durum": durum
             })
-            
-        st.subheader("💰 Kişi Bazlı Bakiye Tablosu")
-        st.dataframe(pd.DataFrame(tablo_data), use_container_width=True)
-        
-        # Minimum Para Transferi Algoritması
+        st.subheader("💰 Kişi Bazlı Bakiye")
+        st.dataframe(pd.DataFrame(tablo), use_container_width=True)
+
+        # Transfer Algoritması
         st.markdown("---")
-        st.subheader("🤝 Kolay Hesaplaşma (Transfer Listesi)")
-        borclular = [{"kisi": k, "tutar": -b} for k, b in bakiyeler.items() if b < -0.01]
-        alacaklilar = [{"kisi": k, "tutar": b} for k, b in bakiyeler.items() if b > 0.01]
-        
-        i, j = 0, 0
+        st.subheader("🤝 Transfer Listesi")
+        borclular   = [{"k": k, "t": -b} for k, b in bakiyeler.items() if b < -0.01]
+        alacaklilar = [{"k": k, "t":  b} for k, b in bakiyeler.items() if b >  0.01]
+        i = j = 0
         transferler = []
         while i < len(borclular) and j < len(alacaklilar):
-            odenecek = min(borclular[i]["tutar"], alacaklilar[j]["tutar"])
-            if odenecek > 0.01:
-                transferler.append({
-                    "borclu": borclular[i]["kisi"],
-                    "alacakli": alacaklilar[j]["kisi"],
-                    "tutar": odenecek
-                })
-            borclular[i]["tutar"] -= odenecek
-            alacaklilar[j]["tutar"] -= odenecek
-            if borclular[i]["tutar"] < 0.01: i += 1
-            if alacaklilar[j]["tutar"] < 0.01: j += 1
-            
-        if transferler:
-            for t in transferler:
-                st.info(f"👉 **{t['borclu']}** ➡️ **{t['alacakli']}** kişisine **{t['tutar']:,.2f} ₺** gönderecek.")
-        else:
-            st.success("🎉 Herkes ödeşmiş durumda! Transfer gerekmiyor.")
+            ode = min(borclular[i]["t"], alacaklilar[j]["t"])
+            if ode > 0.01:
+                transferler.append((borclular[i]["k"], alacaklilar[j]["k"], ode))
+            borclular[i]["t"]   -= ode
+            alacaklilar[j]["t"] -= ode
+            if borclular[i]["t"]   < 0.01: i += 1
+            if alacaklilar[j]["t"] < 0.01: j += 1
 
-        # WhatsApp Özeti
+        if transferler:
+            for b, a, t in transferler:
+                st.info(f"👉 **{b}** ➡️ **{a}** kişisine **{t:,.2f} ₺** gönderecek.")
+        else:
+            st.success("🎉 Herkes ödeşmiş!")
+
+        # WhatsApp
         st.markdown("---")
         st.subheader("📲 WhatsApp Tatil Grubu Özeti")
-        toplam_grup_harcamasi = sum(h["Tutar"] for h in st.session_state.harcamalar)
-        
-        wp_metin = f"🏖️ *TATİL HESAPLAŞMA DÖKÜMÜ*\n"
-        wp_metin += f"📅 *Tarih:* {st.session_state.tatil_baslangic.strftime('%d.%m')} - {st.session_state.tatil_bitis.strftime('%d.%m.%Y')}\n"
-        wp_metin += f"💰 *Toplam Harcama:* {toplam_grup_harcamasi:,.2f} TL\n\n"
-        wp_metin += "📊 *Kişi Bazlı Durum:*\n"
+        toplam = sum(h["Tutar"] for h in st.session_state.harcamalar)
+        wp  = f"🏖️ *TATİL HESAPLAŞMA DÖKÜMÜ*\n"
+        wp += f"📅 {st.session_state.tatil_bas.strftime('%d.%m')} – {st.session_state.tatil_bit.strftime('%d.%m.%Y')}\n"
+        wp += f"💰 *Toplam Harcama:* {toplam:,.2f} TL\n\n"
+        wp += "📊 *Kişi Bazlı Durum:*\n"
         for k in st.session_state.kisiler:
-            isim = k["İsim"]
-            net = bakiyeler[isim]
-            if net > 0.01:
-                wp_metin += f"• {isim}: +{net:,.2f} TL (Alacaklı)\n"
-            elif net < -0.01:
-                wp_metin += f"• {isim}: {net:,.2f} TL (Borçlu)\n"
-            else:
-                wp_metin += f"• {isim}: 0.00 TL (Ödeşti)\n"
-                
-        wp_metin += "\n🤝 *Ödeme / Transfer Planı:*\n"
+            n = bakiyeler.get(k["İsim"], 0)
+            wp += f"• {k['İsim']}: {n:+,.2f} TL ({'Alacaklı' if n>0.01 else 'Borçlu' if n<-0.01 else 'Ödeşti'})\n"
+        wp += "\n🤝 *Transfer Planı:*\n"
         if transferler:
-            for t in transferler:
-                wp_metin += f"👉 {t['borclu']} ➔ {t['alacakli']}: *{t['tutar']:,.2f} TL*\n"
+            for b, a, t in transferler:
+                wp += f"👉 {b} ➔ {a}: *{t:,.2f} TL*\n"
         else:
-            wp_metin += "Tüm hesaplar sıfırlandı! 🎉\n"
-            
-        st.text_area("Kopyalanabilir Özet:", value=wp_metin, height=180)
-        encoded_wp = urllib.parse.quote(wp_metin)
-        whatsapp_link = f"https://api.whatsapp.com/send?text={encoded_wp}"
-        st.markdown(f'<a href="{whatsapp_link}" target="_blank"><button style="width:100%; padding:12px; background-color:#25D366; color:white; border:none; border-radius:10px; font-weight:bold; font-size:16px; cursor:pointer;">📲 WhatsApp Grubuna Gönder</button></a>', unsafe_allow_html=True)
+            wp += "Tüm hesaplar sıfırlandı! 🎉\n"
+        st.text_area("Kopyalanabilir Özet:", value=wp, height=200)
+        enc = urllib.parse.quote(wp)
+        st.markdown(
+            f'<a href="https://api.whatsapp.com/send?text={enc}" target="_blank">'
+            f'<button style="width:100%;padding:12px;background:#25D366;color:white;border:none;'
+            f'border-radius:10px;font-weight:bold;font-size:16px;cursor:pointer;">'
+            f'📲 WhatsApp Grubuna Gönder</button></a>', unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
-# MENÜ 6: AYARLAR & YEDEKLEME
+# MENÜ 6: GRAFİKLER (YENİ)
+# -------------------------------------------------------------------
+elif menu == "📈 Harcama Grafikleri":
+    st.header("📈 Harcama Analizi & Grafikler")
+    if not st.session_state.kisiler or not st.session_state.harcamalar:
+        st.info("Grafik görmek için kişi ve harcama girmelisiniz.")
+    else:
+        bakiyeler, harcanan, kullanim = hesapla_bakiyeler()
+
+        # 1. Kişi Bazlı Çubuk Grafik
+        st.subheader("👤 Kişi Bazlı Ödedi vs. Kullandı")
+        isimler = [k["İsim"] for k in st.session_state.kisiler]
+        fig_bar = go.Figure()
+        fig_bar.add_trace(go.Bar(
+            name="Cebinden Ödedi",
+            x=isimler,
+            y=[harcanan.get(i, 0) for i in isimler],
+            marker_color="#00ACC1",
+            text=[f"{harcanan.get(i,0):,.0f} ₺" for i in isimler],
+            textposition="outside"
+        ))
+        fig_bar.add_trace(go.Bar(
+            name="Hakkı / Kullandığı",
+            x=isimler,
+            y=[kullanim.get(i, 0) for i in isimler],
+            marker_color="#FF7043",
+            text=[f"{kullanim.get(i,0):,.0f} ₺" for i in isimler],
+            textposition="outside"
+        ))
+        fig_bar.update_layout(
+            barmode="group", template="plotly_white",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            yaxis_title="Tutar (₺)", font=dict(family="Plus Jakarta Sans"),
+            margin=dict(t=40, b=20)
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+        # 2. Kategoriye Göre Pasta Grafik
+        st.markdown("---")
+        st.subheader("🗂️ Kategoriye Göre Harcama Dağılımı")
+        kat_toplamlar = {}
+        for h in st.session_state.harcamalar:
+            kat = h.get("Kategori", "💊 Diğer")
+            kat_toplamlar[kat] = kat_toplamlar.get(kat, 0) + h["Tutar"]
+
+        if kat_toplamlar:
+            fig_pie = px.pie(
+                values=list(kat_toplamlar.values()),
+                names=list(kat_toplamlar.keys()),
+                color_discrete_sequence=px.colors.qualitative.Set3,
+                hole=0.35
+            )
+            fig_pie.update_traces(
+                textposition="inside", textinfo="percent+label",
+                textfont_size=13
+            )
+            fig_pie.update_layout(
+                font=dict(family="Plus Jakarta Sans"),
+                legend=dict(orientation="h"),
+                margin=dict(t=20, b=20)
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        # 3. Günlük Harcama Trendi
+        st.markdown("---")
+        st.subheader("📅 Günlük Toplam Harcama Trendi")
+        gun_toplamlar = {}
+        for h in st.session_state.harcamalar:
+            hb = h.get("Başlangıç", st.session_state.tatil_bas)
+            hs = h.get("Bitiş", st.session_state.tatil_bit)
+            if isinstance(hb, (date, datetime)) and isinstance(hs, (date, datetime)):
+                n_gun = (hs - hb).days + 1
+                gunluk = h["Tutar"] / n_gun
+                for i in range(n_gun):
+                    g = hb + timedelta(days=i)
+                    g_str = g.strftime("%d.%m")
+                    gun_toplamlar[g_str] = gun_toplamlar.get(g_str, 0) + gunluk
+
+        if gun_toplamlar:
+            gun_df = pd.DataFrame(
+                sorted(gun_toplamlar.items(), key=lambda x: x[0]),
+                columns=["Tarih", "Toplam (₺)"]
+            )
+            fig_line = px.line(
+                gun_df, x="Tarih", y="Toplam (₺)",
+                markers=True,
+                line_shape="spline",
+                color_discrete_sequence=["#00838F"]
+            )
+            fig_line.update_traces(
+                line_width=3, marker_size=8,
+                fill="tozeroy", fillcolor="rgba(0,131,143,0.08)"
+            )
+            fig_line.update_layout(
+                template="plotly_white",
+                font=dict(family="Plus Jakarta Sans"),
+                yaxis_title="Tutar (₺)", xaxis_title="Gün",
+                margin=dict(t=20, b=20)
+            )
+            st.plotly_chart(fig_line, use_container_width=True)
+
+# -------------------------------------------------------------------
+# MENÜ 7: AYARLAR & YEDEKLEME
 # -------------------------------------------------------------------
 elif menu == "⚙️ Ayarlar & Yedekleme":
-    st.header("⚙️ Genel Tatil & Ortak Havuz Ayarları")
-    
-    st.subheader("🗓️ Genel Tatil Tarih Aralığı")
-    yeni_tarihler = st.date_input(
-        "Tatil Başlangıç ve Bitiş Tarihi:",
-        value=(st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
-    )
-    if st.button("Tarih Aralığını Güncelle"):
-        if isinstance(yeni_tarihler, (list, tuple)) and len(yeni_tarihler) == 2:
-            st.session_state.tatil_baslangic, st.session_state.tatil_bitis = yeni_tarihler
-            ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
-            st.success("Tatil tarihleri ortak havuza kaydedildi!")
+    st.header("⚙️ Ayarlar & Yedekleme")
+
+    st.subheader("🗓️ Tatil Tarih Aralığı")
+    yeni_tar = st.date_input("Başlangıç ve Bitiş:",
+        value=(st.session_state.tatil_bas, st.session_state.tatil_bit))
+    if st.button("Tarihleri Güncelle"):
+        if isinstance(yeni_tar, (list, tuple)) and len(yeni_tar) == 2:
+            st.session_state.tatil_bas, st.session_state.tatil_bit = yeni_tar
+            db_kaydet()
+            st.success("Tatil tarihleri kaydedildi!")
             st.rerun()
 
     st.markdown("---")
-    st.subheader("💾 Verileri İndir / Yedek Al")
-    st.caption("Tatil verilerinizi tek tıkla telefonunuza veya bilgisayarınıza JSON formatında indirebilirsiniz.")
-    with open(DB_FILE, "r", encoding="utf-8") as f:
-        db_json_data = f.read()
-    st.download_button(
-        label="📥 Tüm Tatil Verilerini İndir (JSON Yedek)",
-        data=db_json_data,
-        file_name="tatil_verileri_yedek.json",
-        mime="application/json"
-    )
+    st.subheader("🌤️ Hava Durumu Ayarı")
+    yeni_sehir = st.text_input("Şehir Adı (Hava Durumu için):", value=st.session_state.sehir)
+    yeni_owm   = st.text_input("OpenWeatherMap API Key (opsiyonel):",
+        value=st.session_state.owm_api_key, type="password",
+        help="https://openweathermap.org/api adresinden ücretsiz alabilirsiniz.")
+    if st.button("Hava Durumu Ayarlarını Kaydet"):
+        st.session_state.sehir = yeni_sehir
+        st.session_state.owm_api_key = yeni_owm
+        db_kaydet()
+        st.success("Kaydedildi!")
+        st.rerun()
 
     st.markdown("---")
     st.subheader("🔑 Gemini API Anahtarı")
-    yeni_key = st.text_input("Gemini API Key:", value=st.session_state.gemini_api_key, type="password")
-    if st.button("API Key Kaydet"):
-        st.session_state.gemini_api_key = yeni_key
-        st.success("API Anahtarı kaydedildi!")
+    yeni_gem = st.text_input("Gemini API Key:", value=st.session_state.gemini_api_key, type="password")
+    if st.button("Gemini Key Kaydet"):
+        st.session_state.gemini_api_key = yeni_gem
+        st.success("Kaydedildi!")
 
     st.markdown("---")
-    st.subheader("⚠️ Ortak Havuzu Sıfırla")
-    st.caption("Dikkat: Bu işlem ortak veritabanındaki tüm kişileri ve harcamaları herkes için sıfırlar.")
-    if st.button("🗑️ Tüm Verileri Sıfırla (Herkes İçin)", type="primary"):
-        st.session_state.kisiler = []
-        st.session_state.harcamalar = []
-        st.session_state.fisten_okunanlar = []
-        ortak_verileri_kaydet([], [], st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
-        st.rerun()
+    st.subheader("💾 Veri Yedekleme")
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            json_data = f.read()
+        st.download_button("📥 Tüm Verileri İndir (JSON)", data=json_data,
+            file_name="tatil_yedek.json", mime="application/json")
+
+    st.markdown("---")
+    st.subheader("⚠️ Tüm Verileri Sıfırla")
+    st.error("🚨 Bu işlem **GERİ ALINAMAZ** ve tüm kişi/harcama verilerini herkes için siler!")
+    onay = st.text_input("Onaylamak için tam olarak **ONAYLA** yazın:")
+    if st.button("🗑️ Tüm Verileri Sıfırla", type="primary"):
+        if onay.strip() == "ONAYLA":
+            st.session_state.kisiler = []
+            st.session_state.harcamalar = []
+            st.session_state.fisten_okunanlar = []
+            db_kaydet()
+            st.success("✅ Tüm veriler sıfırlandı.")
+            st.rerun()
+        else:
+            st.error("❌ 'ONAYLA' yazmadan sıfırlama yapılamaz!")
