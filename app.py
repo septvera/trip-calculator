@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from PIL import Image
 import json
+import os
 import re
 import urllib.parse
 from datetime import datetime, date, timedelta
@@ -25,10 +26,8 @@ st.set_page_config(
 # ==========================================
 st.markdown("""
 <style>
-    /* Google Fonts */
     @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap');
 
-    /* Ana Metin ve Tipografi (İkon fontlarını bozmadan) */
     html, body, [data-testid="stAppViewContainer"], [data-testid="stSidebar"] {
         font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
     }
@@ -37,14 +36,12 @@ st.markdown("""
         font-family: 'Plus Jakarta Sans', sans-serif !important;
     }
 
-    /* Başlıklar */
     h1, h2, h3, h4, h5, h6 {
         font-family: 'Outfit', sans-serif !important;
         font-weight: 700 !important;
         letter-spacing: -0.02em !important;
     }
 
-    /* Ana Başlık Özel Gradyanı */
     h1 {
         background: linear-gradient(135deg, #00838F 0%, #00ACC1 50%, #FF7043 100%);
         -webkit-background-clip: text;
@@ -53,7 +50,6 @@ st.markdown("""
         padding-bottom: 0.2rem;
     }
 
-    /* 🛡️ Streamlit Sistem İkonlarını Koruma (Yazı olarak çıkmasını engeller) */
     [data-testid="stIconMaterial"], 
     .material-symbols-rounded, 
     .material-symbols-sharp, 
@@ -70,7 +66,6 @@ st.markdown("""
         display: inline-block !important;
     }
 
-    /* Kartlar ve Expander Görünümleri */
     div[data-testid="stExpander"] {
         border: 1px solid #E2E8F0 !important;
         border-radius: 14px !important;
@@ -79,7 +74,6 @@ st.markdown("""
         margin-bottom: 12px !important;
     }
 
-    /* Butonlar */
     div.stButton > button {
         border-radius: 10px !important;
         font-family: 'Outfit', sans-serif !important;
@@ -92,14 +86,12 @@ st.markdown("""
         box-shadow: 0 4px 12px rgba(0, 131, 143, 0.25) !important;
     }
 
-    /* Tablo & Veri Çerçevesi */
     div[data-testid="stDataFrame"] {
         border-radius: 12px !important;
         overflow: hidden !important;
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04) !important;
     }
 
-    /* Bilgi & Uyarı Kutuları */
     div[data-testid="stAlert"] {
         border-radius: 12px !important;
         font-weight: 500 !important;
@@ -108,44 +100,124 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 🧠 3. SESSION STATE (BELLEK) YÖNETİMİ & GÜVENLİK
+# 🌐 3. ORTAK CANLI VERİTABANI SİSTEMİ (TÜM KULLANICILAR İÇİN)
 # ==========================================
-bugun = date.today()
-if 'tatil_baslangic' not in st.session_state or not isinstance(st.session_state.tatil_baslangic, date):
-    st.session_state.tatil_baslangic = bugun
-if 'tatil_bitis' not in st.session_state or not isinstance(st.session_state.tatil_bitis, date):
-    st.session_state.tatil_bitis = bugun + timedelta(days=13)
-if 'kisiler' not in st.session_state:
-    st.session_state.kisiler = []
-if 'harcamalar' not in st.session_state:
-    st.session_state.harcamalar = []
+DB_FILE = "tatil_veritabani.json"
+
+def tarih_serilestir(obj):
+    if isinstance(obj, (date, datetime)):
+        return obj.isoformat()
+    return obj
+
+def tarih_ayikla(val, default_date):
+    if not val:
+        return default_date
+    if isinstance(val, (date, datetime)):
+        return val if isinstance(val, date) else val.date()
+    if isinstance(val, str):
+        try:
+            return date.fromisoformat(val)
+        except Exception:
+            return default_date
+    if isinstance(val, int):
+        return default_date + timedelta(days=max(0, val - 1))
+    return default_date
+
+def ortak_verileri_yukle():
+    bugun = date.today()
+    varsayilan = {
+        "tatil_baslangic": bugun.isoformat(),
+        "tatil_bitis": (bugun + timedelta(days=13)).isoformat(),
+        "kisiler": [],
+        "harcamalar": []
+    }
+    
+    if not os.path.exists(DB_FILE):
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(varsayilan, f, ensure_ascii=False, indent=2)
+        return varsayilan
+    
+    try:
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            veri = json.load(f)
+            return veri
+    except Exception:
+        return varsayilan
+
+def ortak_verileri_kaydet(kisiler, harcamalar, tatil_bas, tatil_bit):
+    # Tarihleri string (ISO) formatına çevirerek diske yaz
+    kisiler_kayit = []
+    for k in kisiler:
+        kisiler_kayit.append({
+            "İsim": k["İsim"],
+            "Giriş": tarih_serilestir(k.get("Giriş", tatil_bas)),
+            "Çıkış": tarih_serilestir(k.get("Çıkış", tatil_bit)),
+            "Kalış Süresi": k.get("Kalış Süresi", "1 Gün")
+        })
+        
+    harcamalar_kayit = []
+    for h in harcamalar:
+        harcamalar_kayit.append({
+            "ID": h["ID"],
+            "Açıklama": h["Açıklama"],
+            "Tutar": float(h["Tutar"]),
+            "Ödeyen": h["Ödeyen"],
+            "Dahil Olanlar": h.get("Dahil Olanlar", []),
+            "Başlangıç": tarih_serilestir(h.get("Başlangıç", tatil_bas)),
+            "Bitiş": tarih_serilestir(h.get("Bitiş", tatil_bit))
+        })
+        
+    veri_paketi = {
+        "tatil_baslangic": tarih_serilestir(tatil_bas),
+        "tatil_bitis": tarih_serilestir(tatil_bit),
+        "kisiler": kisiler_kayit,
+        "harcamalar": harcamalar_kayit
+    }
+    
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(veri_paketi, f, ensure_ascii=False, indent=2)
+
+# Oturum Başında Ortak Veritabanını Yükle
+veri_db = ortak_verileri_yukle()
+bugun_dt = date.today()
+st.session_state.tatil_baslangic = tarih_ayikla(veri_db.get("tatil_baslangic"), bugun_dt)
+st.session_state.tatil_bitis = tarih_ayikla(veri_db.get("tatil_bitis"), bugun_dt + timedelta(days=13))
+
+# Kişileri Session'a aktar
+st.session_state.kisiler = []
+for k in veri_db.get("kisiler", []):
+    g = tarih_ayikla(k.get("Giriş") or k.get("Geliş"), st.session_state.tatil_baslangic)
+    c = tarih_ayikla(k.get("Çıkış") or k.get("Gidiş"), st.session_state.tatil_bitis)
+    st.session_state.kisiler.append({
+        "İsim": k["İsim"],
+        "Giriş": g,
+        "Çıkış": c,
+        "Kalış Süresi": f"{(c - g).days + 1} Gün"
+    })
+
+# Harcamaları Session'a aktar
+st.session_state.harcamalar = []
+for h in veri_db.get("harcamalar", []):
+    hb = tarih_ayikla(h.get("Başlangıç"), st.session_state.tatil_baslangic)
+    hs = tarih_ayikla(h.get("Bitiş"), st.session_state.tatil_bitis)
+    st.session_state.harcamalar.append({
+        "ID": h.get("ID", len(st.session_state.harcamalar) + 1),
+        "Açıklama": h["Açıklama"],
+        "Tutar": float(h["Tutar"]),
+        "Ödeyen": h["Ödeyen"],
+        "Dahil Olanlar": h.get("Dahil Olanlar", []),
+        "Başlangıç": hb,
+        "Bitiş": hs
+    })
+
 if 'fisten_okunanlar' not in st.session_state:
     st.session_state.fisten_okunanlar = []
+
 if 'gemini_api_key' not in st.session_state:
     if "GEMINI_API_KEY" in st.secrets:
         st.session_state.gemini_api_key = st.secrets["GEMINI_API_KEY"]
     else:
         st.session_state.gemini_api_key = DEFAULT_GEMINI_API_KEY
-
-def to_date_obj(val, default_date):
-    if isinstance(val, (date, datetime)):
-        return val if isinstance(val, date) else val.date()
-    elif isinstance(val, int):
-        return st.session_state.tatil_baslangic + timedelta(days=max(0, val - 1))
-    return default_date
-
-for k in st.session_state.kisiler:
-    k_giris_raw = k.get("Giriş") if "Giriş" in k else k.get("Geliş", 1)
-    k_cikis_raw = k.get("Çıkış") if "Çıkış" in k else k.get("Gidiş", 14)
-    k["Giriş"] = to_date_obj(k_giris_raw, st.session_state.tatil_baslangic)
-    k["Çıkış"] = to_date_obj(k_cikis_raw, st.session_state.tatil_bitis)
-    k["Kalış Süresi"] = f"{(k['Çıkış'] - k['Giriş']).days + 1} Gün"
-
-for h in st.session_state.harcamalar:
-    h_bas_raw = h.get("Başlangıç", 1)
-    h_bit_raw = h.get("Bitiş", 14)
-    h["Başlangıç"] = to_date_obj(h_bas_raw, st.session_state.tatil_baslangic)
-    h["Bitiş"] = to_date_obj(h_bit_raw, st.session_state.tatil_bitis)
 
 def get_tatil_gunleri():
     bas = st.session_state.tatil_baslangic
@@ -199,6 +271,14 @@ def gemini_ile_fis_oku(gorsel):
 # ==========================================
 st.title("🏖️ Tatil Harcama & Ev Takvimi")
 
+# Canlı Senkronizasyon Butonu (Üst Çubuk)
+col_sync1, col_sync2 = st.columns([3, 1])
+with col_sync1:
+    st.caption("🟢 **Canlı Ortak Havuz Aktif:** Arkadaşlarınızın eklediği harcamalar ve kişiler otomatik senkronize olur.")
+with col_sync2:
+    if st.button("🔄 Canlı Verileri Yenile", use_container_width=True):
+        st.rerun()
+
 menu = st.sidebar.radio(
     "Menü", 
     [
@@ -207,7 +287,7 @@ menu = st.sidebar.radio(
         "💸 Manuel Harcama Ekle", 
         "📸 Fişten Yapay Zeka ile Ekle", 
         "📊 Hesaplaşma & WhatsApp", 
-        "⚙️ Ayarlar"
+        "⚙️ Ayarlar & Yedekleme"
     ]
 )
 
@@ -307,7 +387,8 @@ elif menu == "👥 Kişileri Yönet":
                             "Çıkış": k_cikis,
                             "Kalış Süresi": f"{(k_cikis - k_giris).days + 1} Gün"
                         })
-                        st.success(f"✅ {isim} ({k_giris.strftime('%d.%m')} - {k_cikis.strftime('%d.%m')}) başarıyla eklendi!")
+                        ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
+                        st.success(f"✅ {isim} ortak havuza kaydedildi!")
                         st.rerun()
                 elif isinstance(tarih_araligi, (list, tuple)) and len(tarih_araligi) == 1:
                     k_giris = k_cikis = tarih_araligi[0]
@@ -317,13 +398,14 @@ elif menu == "👥 Kişileri Yönet":
                         "Çıkış": k_cikis,
                         "Kalış Süresi": "1 Gün"
                     })
-                    st.success(f"✅ {isim} eklendi!")
+                    ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
+                    st.success(f"✅ {isim} ortak havuza kaydedildi!")
                     st.rerun()
                 else:
                     st.error("Lütfen hem giriş hem çıkış tarihini seçiniz!")
 
     with col2:
-        st.subheader("📋 Kayıtlı Kişiler")
+        st.subheader("📋 Kayıtlı Kişiler (Ortak Liste)")
         if st.session_state.kisiler:
             df_goster = []
             for k in st.session_state.kisiler:
@@ -341,6 +423,7 @@ elif menu == "👥 Kişileri Yönet":
             if st.button("❌ Seçili Kişiyi Sil"):
                 st.session_state.kisiler = [k for k in st.session_state.kisiler if k["İsim"] != kisi_sil]
                 st.session_state.harcamalar = [h for h in st.session_state.harcamalar if h["Ödeyen"] != kisi_sil]
+                ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
                 st.rerun()
         else:
             st.info("Henüz kişi eklenmedi.")
@@ -373,7 +456,7 @@ elif menu == "💸 Manuel Harcama Ekle":
                 max_value=st.session_state.tatil_bitis + timedelta(days=60)
             )
             
-            submit_h = st.form_submit_button("💾 Harcamayı Kaydet", use_container_width=True)
+            submit_h = st.form_submit_button("💾 Harcamayı Ortak Havuza Kaydet", use_container_width=True)
             if submit_h:
                 if not aciklama or tutar <= 0:
                     st.error("Lütfen açıklama ve geçerli bir tutar girin!")
@@ -394,12 +477,13 @@ elif menu == "💸 Manuel Harcama Ekle":
                         "Başlangıç": h_bas,
                         "Bitiş": h_bit
                     })
-                    st.success(f"✅ '{aciklama}' ({tutar:.2f} ₺) başarıyla kaydedildi!")
+                    ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
+                    st.success(f"✅ '{aciklama}' ({tutar:.2f} ₺) ortak havuza kaydedildi!")
                     st.rerun()
 
         if st.session_state.harcamalar:
             st.markdown("---")
-            st.subheader("📋 Kayıtlı Harcamalar")
+            st.subheader("📋 Kayıtlı Harcamalar (Ortak Liste)")
             ozet_h = []
             for h in st.session_state.harcamalar:
                 h_b = h.get("Başlangıç", st.session_state.tatil_baslangic)
@@ -422,6 +506,7 @@ elif menu == "💸 Manuel Harcama Ekle":
             if st.button("❌ Seçili Harcamayı Sil"):
                 secili_id = int(harcama_sil_id.split(" - ")[0].replace("#", ""))
                 st.session_state.harcamalar = [h for h in st.session_state.harcamalar if h["ID"] != secili_id]
+                ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
                 st.rerun()
 
 # -------------------------------------------------------------------
@@ -489,6 +574,7 @@ elif menu == "📸 Fişten Yapay Zeka ile Ekle":
                                 "Bitiş": h_s
                             })
                             st.session_state.fisten_okunanlar.pop(i)
+                            ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
                             st.rerun()
                     with col_b2:
                         if st.button(f"🗑️ Yoksay", key=f"sil_{i}", use_container_width=True):
@@ -617,10 +703,10 @@ elif menu == "📊 Hesaplaşma & WhatsApp":
         st.markdown(f'<a href="{whatsapp_link}" target="_blank"><button style="width:100%; padding:12px; background-color:#25D366; color:white; border:none; border-radius:10px; font-weight:bold; font-size:16px; cursor:pointer;">📲 WhatsApp Grubuna Gönder</button></a>', unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
-# MENÜ 6: AYARLAR
+# MENÜ 6: AYARLAR & YEDEKLEME
 # -------------------------------------------------------------------
-elif menu == "⚙️ Ayarlar":
-    st.header("⚙️ Genel Tatil & Takvim Ayarları")
+elif menu == "⚙️ Ayarlar & Yedekleme":
+    st.header("⚙️ Genel Tatil & Ortak Havuz Ayarları")
     
     st.subheader("🗓️ Genel Tatil Tarih Aralığı")
     yeni_tarihler = st.date_input(
@@ -630,8 +716,21 @@ elif menu == "⚙️ Ayarlar":
     if st.button("Tarih Aralığını Güncelle"):
         if isinstance(yeni_tarihler, (list, tuple)) and len(yeni_tarihler) == 2:
             st.session_state.tatil_baslangic, st.session_state.tatil_bitis = yeni_tarihler
-            st.success("Tatil tarihleri güncellendi!")
+            ortak_verileri_kaydet(st.session_state.kisiler, st.session_state.harcamalar, st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
+            st.success("Tatil tarihleri ortak havuza kaydedildi!")
             st.rerun()
+
+    st.markdown("---")
+    st.subheader("💾 Verileri İndir / Yedek Al")
+    st.caption("Tatil verilerinizi tek tıkla telefonunuza veya bilgisayarınıza JSON formatında indirebilirsiniz.")
+    with open(DB_FILE, "r", encoding="utf-8") as f:
+        db_json_data = f.read()
+    st.download_button(
+        label="📥 Tüm Tatil Verilerini İndir (JSON Yedek)",
+        data=db_json_data,
+        file_name="tatil_verileri_yedek.json",
+        mime="application/json"
+    )
 
     st.markdown("---")
     st.subheader("🔑 Gemini API Anahtarı")
@@ -641,9 +740,11 @@ elif menu == "⚙️ Ayarlar":
         st.success("API Anahtarı kaydedildi!")
 
     st.markdown("---")
-    st.subheader("⚠️ Verileri Temizle")
-    if st.button("🗑️ Tüm Verileri Sıfırla", type="primary"):
+    st.subheader("⚠️ Ortak Havuzu Sıfırla")
+    st.caption("Dikkat: Bu işlem ortak veritabanındaki tüm kişileri ve harcamaları herkes için sıfırlar.")
+    if st.button("🗑️ Tüm Verileri Sıfırla (Herkes İçin)", type="primary"):
         st.session_state.kisiler = []
         st.session_state.harcamalar = []
         st.session_state.fisten_okunanlar = []
+        ortak_verileri_kaydet([], [], st.session_state.tatil_baslangic, st.session_state.tatil_bitis)
         st.rerun()
